@@ -1,0 +1,58 @@
+# AgentD — project-level gitignore
+
+# Runtime PID and log files (created by startup scripts)
+.pids/
+.logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.coverage
+.coverage.*
+.mypy_cache/
+.ruff_cache/
+
+# Environment secrets
+.env
+*.env
+*.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+.next/
+.turbo/
+
+# Debug output
+debug/
+
+# Project-local runtime and generated artifacts
+agentd/.env
+agentd/.venv/
+agentd/__pycache__/
+agentd/.pytest_cache/
+agentd/.coverage
+agentd/.coverage.*
+web/.env.local
+web/node_modules/
+web/.next/
+web/.turbo/
+
+# Local docs / planning files kept out of GitHub baseline
+docs/
+AGENTD_CONTRACT.md
+AGENTS.md
+CLAUDE.md
+frontdesign.md
