@@ -145,6 +145,7 @@ class ResolvedModelConfig:
     api_key: str
     model_id: str
     config_id: uuid.UUID | None = None
+    capabilities: dict | None = None
     timeout_seconds: int | None = None
     extra_params: dict | None = None
 
@@ -172,6 +173,7 @@ async def resolve_active_model_config(db: AsyncSession) -> ResolvedModelConfig:
             api_key=mc.api_key,
             model_id=mc.model_id,
             config_id=mc.id,
+            capabilities=mc.capabilities,
             timeout_seconds=mc.timeout_seconds,
             extra_params=mc.extra_params,
         )

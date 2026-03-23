@@ -200,11 +200,33 @@ async def _stream_and_translate(
                     continue
 
                 if node_name == "model":
-                    # Tool calls from complete (aggregated) model output.
-                    # Text content is intentionally skipped here — already
-                    # streamed token-by-token via the "messages" channel.
+                    # Complete model output from "updates" channel.
+                    # When streaming=True, text was already sent token-by-token
+                    # via "messages". When streaming=False, no "messages" events
+                    # are emitted, so we must emit text from here.
                     messages = node_data.get("messages", [])
                     for msg in messages:
+                        # Emit text content if not already streamed
+                        if (
+                            isinstance(msg, AIMessage)
+                            and not isinstance(msg, AIMessageChunk)
+                            and msg.content
+                        ):
+                            if current_message_id is None:
+                                current_message_id = str(uuid.uuid4())
+                            cleaned, reasoning_delta = think_filter.feed(msg.content)
+                            if reasoning_delta:
+                                await publish(session_id, {
+                                    "event": "reasoning_delta",
+                                    "message_id": current_message_id,
+                                    "content": reasoning_delta,
+                                })
+                            if cleaned:
+                                await publish(session_id, {
+                                    "event": "text_delta",
+                                    "message_id": current_message_id,
+                                    "content": cleaned,
+                                })
                         if hasattr(msg, "tool_calls") and msg.tool_calls:
                             for tc in msg.tool_calls:
                                 await publish(session_id, {

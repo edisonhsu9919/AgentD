@@ -340,11 +340,16 @@ async def build_agent(
     async with AsyncSessionLocal() as db:
         resolved = await resolve_active_model_config(db)
 
+    # Respect model capability profile: disable streaming when the model
+    # (or its inference server) does not reliably support it.
+    caps = resolved.capabilities or {}
+    use_streaming = caps.get("streaming", True)
+
     llm = ChatOpenAI(
         model=model_id,
         base_url=resolved.base_url,
         api_key=resolved.api_key,
-        streaming=True,
+        streaming=use_streaming,
         http_async_client=httpx.AsyncClient(trust_env=False),
     )
 
