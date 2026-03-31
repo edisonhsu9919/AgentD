@@ -133,8 +133,23 @@ async def _execute_graph(
     publish: PublishFn,
     check_abort: Optional[AbortCheckFn] = None,
 ) -> None:
-    """Stream agent, handle interrupts, finalize. Raises on error."""
-    await _stream_and_translate(agent, input_data, config, session_id, publish)
+    """Stream agent, handle interrupts, finalize. Raises on error.
+
+    Phase L: Uses try/finally to ensure diagnostics are recorded even on
+    error paths, so that failed runs still carry prompt continuity evidence.
+    """
+    # Phase L: write initial diagnostics early (prompt layer sizes only).
+    # If the run fails before _finalize/_handle_interrupt, at least the
+    # prompt diagnostics will be on the run record.
+    await _record_run_diagnostics(agent, session_id, [])
+
+    aborted = await _stream_and_translate(
+        agent, input_data, config, session_id, publish, check_abort,
+    )
+    if aborted:
+        await _update_db_status(session_id, "idle")
+        await publish(session_id, {"event": "status_change", "status": "idle"})
+        return
 
     # Check abort boundary
     if check_abort and await check_abort():
@@ -161,12 +176,19 @@ async def _execute_graph(
 
 async def _stream_and_translate(
     agent, input_data: Any, config: dict, session_id: str, publish: PublishFn,
-) -> None:
+    check_abort: Optional[AbortCheckFn] = None,
+) -> bool:
     """Stream agent events and translate to AgentD SSE events.
 
     Uses dual stream mode for token-level text streaming:
     - "messages": yields AIMessageChunk per token → text_delta (requires streaming=True)
     - "updates": yields complete node outputs → tool_start / tool_result
+
+    Phase L: Also incrementally persists tool_call and tool_result messages
+    to the messages table as they occur, rather than waiting for _finalize().
+    Phase L: Checks abort at node boundaries (after each model/tools node).
+
+    Returns True if aborted mid-stream, False otherwise.
     """
     current_message_id: str | None = None
     think_filter = _ThinkFilter()
@@ -213,6 +235,8 @@ async def _stream_and_translate(
                                     "tool_name": tc["name"],
                                     "input": tc.get("args", {}),
                                 })
+                            # Phase L: incrementally persist AIMessage with tool_calls
+                            await _persist_message_incremental(session_id, msg)
 
                 elif node_name == "tools":
                     # Flush any buffered text before switching to tool results
@@ -238,6 +262,14 @@ async def _stream_and_translate(
                             "output": content,
                             "is_error": is_error,
                         })
+                    # Phase L: incrementally persist all ToolMessages from this node
+                    for msg in messages:
+                        if isinstance(msg, ToolMessage):
+                            await _persist_message_incremental(session_id, msg)
+
+            # Phase L: check abort at node boundaries (after each updates batch)
+            if check_abort and await check_abort():
+                return True
 
     # Flush any remaining buffered text after the stream ends
     remaining = think_filter.flush()
@@ -247,6 +279,8 @@ async def _stream_and_translate(
             "message_id": current_message_id,
             "content": remaining,
         })
+
+    return False
 
 
 # ── Interrupt handling ───────────────────────────────────────────────────
@@ -338,10 +372,12 @@ async def _handle_interrupt(
             decisions = [{"type": "approve"} for _ in action_requests]
             resume_payload = Command(resume={"decisions": decisions})
 
-            await _stream_and_translate(agent, resume_payload, config, session_id, publish)
+            aborted = await _stream_and_translate(
+                agent, resume_payload, config, session_id, publish, check_abort,
+            )
 
-            # Check abort boundary after auto-resume
-            if check_abort and await check_abort():
+            # Check abort boundary after auto-resume (also caught mid-stream by L4)
+            if aborted or (check_abort and await check_abort()):
                 await _update_db_status(session_id, "idle")
                 await publish(session_id, {"event": "status_change", "status": "idle"})
                 return False
@@ -356,6 +392,17 @@ async def _handle_interrupt(
             return False
 
     # ── Standard ask flow ──
+    # Phase L: persist all in-flight messages before entering waiting state,
+    # so that session switches / refreshes can recover full tool history.
+    full_state = snapshot.values if snapshot else {}
+    waiting_messages = full_state.get("messages", [])
+    if waiting_messages:
+        await _persist_messages(session_id, waiting_messages)
+
+    # Phase L fix: record diagnostics before entering waiting state,
+    # so that waiting runs also have prompt continuity evidence.
+    await _record_run_diagnostics(agent, session_id, waiting_messages)
+
     permission_ids: list[str] = []
 
     try:
@@ -407,13 +454,175 @@ async def _finalize(agent, config: dict, session_id: str, publish: PublishFn) ->
 
     token_usage = _extract_token_usage(messages)
 
+    # Phase L: record prompt diagnostics on the active run
+    await _record_run_diagnostics(agent, session_id, messages)
+
     await _update_db_status(session_id, "idle", token_usage=token_usage)
 
+    # Phase L: call-level context data for frontend "Prompt X / Y" display.
+    # NOTE: context_usage_ratio reflects the LAST model call in this run.
+    # After auto-compaction below, the ratio is NOT recalculated — it still
+    # represents the pre-compaction call. The ratio will drop on the NEXT run
+    # when the compacted checkpoint produces a shorter prompt.
+    last_call = _extract_last_call_usage(messages)
+    context_window_limit = getattr(agent, "_context_window_limit", None)
+    context = {
+        "prompt_tokens": last_call["prompt_tokens"],
+        "completion_tokens": last_call["completion_tokens"],
+        "context_window_limit": context_window_limit,
+    }
+    if context_window_limit and last_call["prompt_tokens"] > 0:
+        context["context_usage_ratio"] = round(
+            last_call["prompt_tokens"] / context_window_limit, 4,
+        )
+
+    # Phase N1: check if context_warning or auto-compact should fire
+    ratio = context.get("context_usage_ratio")
+    from agent.compaction import should_warn, should_compact, compact_session as do_compact
+
+    if should_warn(ratio):
+        await publish(session_id, {
+            "event": "context_warning",
+            "context_usage_ratio": ratio,
+            "context_window_limit": context_window_limit,
+            "prompt_tokens": last_call["prompt_tokens"],
+        })
+
+    if should_compact(ratio):
+        # Auto-compact: best-effort, non-blocking to avoid delaying done event.
+        # We need session_dir and model_id — extract from agent metadata.
+        try:
+            _sd = getattr(agent, "_session_dir", None)
+            _mid = getattr(agent, "_model_id", None)
+            if _sd and _mid:
+                compact_result = await do_compact(
+                    agent=agent,
+                    config=config,
+                    session_id=session_id,
+                    session_dir=_sd,
+                    model_id=_mid,
+                    publish=publish,
+                )
+                if settings.debug:
+                    print(f"[executor] auto-compact result: {compact_result}")
+        except Exception:
+            if settings.debug:
+                traceback.print_exc()
+
     await publish(session_id, {"event": "status_change", "status": "idle"})
-    await publish(session_id, {"event": "done", "token_usage": token_usage})
+    await publish(session_id, {
+        "event": "done",
+        "token_usage": token_usage,
+        "context": context,
+    })
 
     # Auto-generate title (best-effort, non-blocking)
     asyncio.create_task(_maybe_generate_title(session_id, messages, publish))
+
+
+async def _record_run_diagnostics(agent, session_id: str, messages: list) -> None:
+    """Write prompt diagnostics to the active agent_run record (Phase L).
+
+    Combines prompt layer sizes (from build_system_prompt) with message
+    history statistics and per-run token counts so that each run has a
+    complete diagnostic snapshot.
+
+    Phase L prompt strategy: called early in _execute_graph (with empty messages)
+    to ensure prompt diagnostics survive even on failed runs. Called again at
+    _finalize/_handle_interrupt with full messages for complete diagnostics.
+    """
+    try:
+        from agent import scheduler
+
+        prompt_diag = getattr(agent, "_prompt_diagnostics", {})
+
+        # Count messages by type
+        ai_count = sum(1 for m in messages if isinstance(m, AIMessage))
+        tool_count = sum(1 for m in messages if isinstance(m, ToolMessage))
+        human_count = sum(1 for m in messages if isinstance(m, HumanMessage))
+        system_count = sum(1 for m in messages if isinstance(m, SystemMessage))
+
+        # Run-level accumulated token counts (across all model calls in run)
+        token_usage = _extract_token_usage(messages)
+        # Call-level: exact token counts from the LAST provider call
+        last_call = _extract_last_call_usage(messages)
+
+        # Phase L §12.6: checkpoint composition breakdown — lets us distinguish
+        # info loss from ordering instability when diagnosing prompt cliffs.
+        checkpoint_composition = {
+            "human": human_count,
+            "ai": ai_count,
+            "tool": tool_count,
+            "system": system_count,
+            "total": len(messages),
+        }
+
+        # Phase M3: skill observability — extract skill loads and plan ordering
+        import re as _re
+        _skill_re = _re.compile(r"^\[Skill: (.+?) v(.+?)\]")
+        active_skill_names: list[str] = []
+        _skill_seen: set[str] = set()
+        last_skill_load_idx: int = -1
+        first_plan_idx: int = -1
+        for idx, m in enumerate(messages):
+            if isinstance(m, ToolMessage) and m.content:
+                sm = _skill_re.match(m.content)
+                if sm:
+                    sname = sm.group(1)
+                    if sname not in _skill_seen:
+                        _skill_seen.add(sname)
+                        active_skill_names.append(sname)
+                    last_skill_load_idx = idx
+                elif getattr(m, "name", "") == "planning" and first_plan_idx < 0:
+                    first_plan_idx = idx
+
+        diagnostics = {
+            **prompt_diag,
+            "history_message_count": len(messages),
+            "history_ai_count": ai_count,
+            "history_tool_count": tool_count,
+            "history_human_count": human_count,
+            # Run-level accumulated (for trend analysis)
+            "prompt_tokens": token_usage["input"],
+            "completion_tokens": token_usage["output"],
+            "total_tokens": token_usage["total"],
+            # Call-level precise (for window occupancy & compaction)
+            "last_call_prompt_tokens": last_call["prompt_tokens"],
+            "last_call_completion_tokens": last_call["completion_tokens"],
+            "last_call_total_tokens": last_call["total_tokens"],
+            "last_call_cache_read_tokens": last_call["cache_read_tokens"],
+            "last_call_cache_creation_tokens": last_call["cache_creation_tokens"],
+            "checkpoint_composition": checkpoint_composition,
+            # Phase M3: skill execution observability
+            "skill_loads_this_run": len(active_skill_names),
+            "active_skill_names": active_skill_names,
+            "plan_after_skill_load": (
+                first_plan_idx > last_skill_load_idx
+                if last_skill_load_idx >= 0 and first_plan_idx >= 0
+                else None
+            ),
+        }
+
+        async with AsyncSessionLocal() as db:
+            run = await scheduler.get_active_run(db, uuid.UUID(session_id))
+            if run:
+                # Phase L §12.4: attach run_type for start/resume/abort distinction
+                diagnostics["run_type"] = run.run_type
+                # Phase L §12.5: context window ratio — uses CALL-LEVEL prompt
+                # tokens for accurate current-window occupancy display.
+                # Always write context_window_limit; ratio only when tokens available.
+                context_window_limit = getattr(agent, "_context_window_limit", None)
+                if context_window_limit:
+                    diagnostics["context_window_limit"] = context_window_limit
+                    if last_call["prompt_tokens"] > 0:
+                        diagnostics["context_usage_ratio"] = round(
+                            last_call["prompt_tokens"] / context_window_limit, 4,
+                        )
+                await scheduler.update_diagnostics(db, run.id, diagnostics)
+                await db.commit()
+    except Exception:
+        if settings.debug:
+            traceback.print_exc()
 
 
 # ── Helpers (moved from runner.py) ───────────────────────────────────────
@@ -429,6 +638,7 @@ def _is_tool_error(msg) -> bool:
 
 
 def _extract_token_usage(messages: list) -> dict:
+    """Run-level accumulated token counts across all model calls."""
     total_input = 0
     total_output = 0
     for msg in messages:
@@ -438,6 +648,88 @@ def _extract_token_usage(messages: list) -> dict:
                 total_input += usage.get("input_tokens", 0)
                 total_output += usage.get("output_tokens", 0)
     return {"input": total_input, "output": total_output, "total": total_input + total_output}
+
+
+def _extract_last_call_usage(messages: list) -> dict:
+    """Call-level: exact token counts from the most recent provider call.
+
+    Reads usage_metadata from the LAST AIMessage in the checkpoint.
+    This is the precise prompt token count for the current model invocation,
+    suitable for context window occupancy display and compaction triggers.
+    """
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            usage = getattr(msg, "usage_metadata", None)
+            if usage and isinstance(usage, dict):
+                return {
+                    "prompt_tokens": usage.get("input_tokens", 0),
+                    "completion_tokens": usage.get("output_tokens", 0),
+                    "total_tokens": (
+                        usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+                    ),
+                    "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
+                    "cache_creation_tokens": usage.get("cache_creation_input_tokens", 0),
+                }
+    return {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+    }
+
+
+async def _persist_message_incremental(session_id: str, msg) -> None:
+    """Persist a single AIMessage or ToolMessage to the messages table immediately.
+
+    Phase L: called from _stream_and_translate() at tool boundaries so that
+    tool_call / tool_result history survives session switches and refreshes.
+    Uses its own DB session + commit for isolation from the main flow.
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            sid = uuid.UUID(session_id)
+
+            if isinstance(msg, AIMessage):
+                parts = []
+                if msg.content:
+                    raw = msg.content
+                    clean = _strip_model_tags(raw)
+                    reasoning = _extract_reasoning(raw)
+                    if reasoning:
+                        parts.append({"type": "reasoning", "content": reasoning})
+                    if clean:
+                        parts.append({"type": "text", "content": clean})
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        parts.append({
+                            "type": "tool_call",
+                            "tool_call_id": tc["id"],
+                            "tool_name": tc["name"],
+                            "input": tc["args"],
+                        })
+                if parts:
+                    await session_svc.create_message(
+                        db, session_id=sid, role="assistant", parts=parts,
+                    )
+
+            elif isinstance(msg, ToolMessage):
+                tool_name = getattr(msg, "name", "") or ""
+                parts = [{
+                    "type": "tool_result",
+                    "tool_call_id": msg.tool_call_id,
+                    "tool_name": tool_name,
+                    "output": msg.content,
+                    "is_error": _is_tool_error(msg),
+                }]
+                await session_svc.create_message(
+                    db, session_id=sid, role="tool", parts=parts,
+                )
+
+            await db.commit()
+    except Exception:
+        if settings.debug:
+            traceback.print_exc()
 
 
 async def _persist_messages(session_id: str, messages: list) -> None:
@@ -455,6 +747,24 @@ async def _persist_messages(session_id: str, messages: list) -> None:
 
             skip = max(existing_count - 1, 0)
             new_messages = persistable[skip:]
+
+            # Phase N1: post-compaction recovery.
+            # After checkpoint rewrite, checkpoint has fewer messages than DB
+            # (DB keeps full history, checkpoint is compacted). The count-based
+            # skip overshoots and drops the new assistant response.
+            # Fallback: find the last real user message and persist everything after it.
+            if not new_messages and len(persistable) > 0:
+                last_user_idx = -1
+                for j in range(len(persistable) - 1, -1, -1):
+                    if isinstance(persistable[j], HumanMessage) and \
+                       "[Context Summary]" not in (persistable[j].content or ""):
+                        last_user_idx = j
+                        break
+                if last_user_idx >= 0:
+                    new_messages = [
+                        m for m in persistable[last_user_idx + 1:]
+                        if isinstance(m, (AIMessage, ToolMessage))
+                    ]
 
             for msg in new_messages:
                 if isinstance(msg, AIMessage):

@@ -1,4 +1,4 @@
-"""ModelConfig ORM model (Phase I2)."""
+"""ModelConfig ORM model (Phase I2 + O3-1 VLM support)."""
 
 import uuid
 from datetime import datetime, timezone
@@ -20,6 +20,10 @@ class ModelConfig(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
     )
     name: Mapped[str] = mapped_column(String(128), nullable=False)
+    model_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="llm",
+        doc="Model type: 'llm' for text, 'vlm' for vision-language.",
+    )
     provider_type: Mapped[str] = mapped_column(
         String(32), nullable=False, server_default="openai_compatible",
     )
@@ -30,6 +34,10 @@ class ModelConfig(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     capabilities: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     timeout_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    context_window: Mapped[int | None] = mapped_column(
+        Integer, nullable=True,
+        doc="Model context window size in tokens. Used for usage ratio diagnostics.",
+    )
     extra_params: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False,

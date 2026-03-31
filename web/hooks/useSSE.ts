@@ -52,6 +52,9 @@ export function useSSE(sessionId: string | null) {
   const updateSessionTitle = useSessionStore((s) => s.updateSessionTitle);
   const fetchSessions = useSessionStore((s) => s.fetchSessions);
 
+  const setContextWarning = useChatStore((s) => s.setContextWarning);
+  const clearJustCompacted = useChatStore((s) => s.clearJustCompacted);
+
   const fetchTree = useWorkspaceStore((s) => s.fetchTree);
   const fetchTaskPlan = useTaskPlanStore((s) => s.fetchTaskPlan);
 
@@ -181,6 +184,9 @@ export function useSSE(sessionId: string | null) {
           // Don't rely on a prior status_change SSE or async fetchRuntime.
           setStatus("idle");
           updateSessionStatus(sessionId, "idle");
+          // A real model call completed — runtime ratio is now fresh,
+          // so clear the justCompacted suppression flag.
+          clearJustCompacted();
           // Keep streaming content visible until persisted messages arrive
           fetchMessages(sessionId).finally(() => {
             clearStreaming();
@@ -189,6 +195,19 @@ export function useSSE(sessionId: string | null) {
           fetchRuntime(sessionId);
           fetchTree(sessionId);
           fetchTaskPlan(sessionId);
+          break;
+
+        case "context_warning":
+          // New warning from backend overrides justCompacted suppression
+          clearJustCompacted();
+          setContextWarning(true);
+          break;
+
+        case "compaction_done":
+          setContextWarning(false);
+          fetchMessages(sessionId);
+          fetchRuntime(sessionId);
+          showToast("info", `Context compacted — saved ${event.tokens_saved.toLocaleString()} tokens`);
           break;
 
         case "error": {
@@ -237,6 +256,8 @@ export function useSSE(sessionId: string | null) {
     fetchSessions,
     fetchTree,
     fetchTaskPlan,
+    setContextWarning,
+    clearJustCompacted,
     startTypingLoop,
     flushBuffer,
     clearBuffer,

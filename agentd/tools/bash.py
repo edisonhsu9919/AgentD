@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from tools.base import BaseTool, ToolContext
+from skills.env import resolve_env_for_command
 
 _TIMEOUT = 60  # seconds
 _MAX_OUTPUT = 8000  # characters
@@ -87,8 +88,11 @@ class BashTool(BaseTool):
         if _has_outside_paths(command, ctx.session_dir):
             return {"output": "permission_denied: command references paths outside workspace", "is_error": True}
 
-        # Build environment with venv activated
-        env_prefix = f'export PATH="{ctx.venv_bin}:$PATH" && '
+        # Per-call env resolution (Phase M4-D)
+        effective_bin = resolve_env_for_command(
+            ctx.session_dir, command, ctx.venv_bin,
+        )
+        env_prefix = f'export PATH="{effective_bin}:$PATH" && '
         full_cmd = env_prefix + command
 
         try:

@@ -15,12 +15,17 @@ User runtime directory (unchanged):
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
+import subprocess
+import sys
 from typing import Any
 
 from core.config import settings
 from skills.package import SkillPackageMeta, parse_frontmatter, strip_frontmatter
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -82,10 +87,19 @@ def remove_skill_from_catalog(name: str, version: str | None = None) -> None:
                 os.rmdir(parent)
 
 
+class SkillImportError(Exception):
+    """Raised when a skill import fails (e.g. venv build or pip install)."""
+
+
 def import_package_to_catalog(package_dir: str, meta: SkillPackageMeta) -> str:
     """Import a local skill package directory into the versioned catalog.
 
-    Copies SKILL.md and optional resource dirs (references/, assets/, scripts/).
+    Copies SKILL.md, optional resource dirs (references/, assets/, scripts/),
+    and requirements.txt. If requirements.txt is present, auto-builds a .venv
+    with fail-fast semantics: if venv creation or pip install fails, the
+    partially imported version directory is cleaned up and SkillImportError
+    is raised.
+
     Returns the catalog version directory path.
     """
     catalog_dir = get_catalog_dir()
@@ -96,15 +110,41 @@ def import_package_to_catalog(package_dir: str, meta: SkillPackageMeta) -> str:
         shutil.rmtree(version_dir)
     os.makedirs(version_dir, exist_ok=True)
 
-    # Copy SKILL.md
-    src_md = os.path.join(package_dir, "SKILL.md")
-    shutil.copy2(src_md, os.path.join(version_dir, "SKILL.md"))
+    try:
+        # Copy SKILL.md
+        src_md = os.path.join(package_dir, "SKILL.md")
+        shutil.copy2(src_md, os.path.join(version_dir, "SKILL.md"))
 
-    # Copy optional resource directories
-    for subdir in ("references", "assets", "scripts"):
-        src_sub = os.path.join(package_dir, subdir)
-        if os.path.isdir(src_sub):
-            shutil.copytree(src_sub, os.path.join(version_dir, subdir))
+        # Copy optional resource directories
+        for subdir in ("references", "assets", "scripts"):
+            src_sub = os.path.join(package_dir, subdir)
+            if os.path.isdir(src_sub):
+                shutil.copytree(src_sub, os.path.join(version_dir, subdir))
+
+        # Copy requirements.txt if present
+        src_reqs = os.path.join(package_dir, "requirements.txt")
+        if os.path.isfile(src_reqs):
+            shutil.copy2(src_reqs, os.path.join(version_dir, "requirements.txt"))
+            # Build .venv with fail-fast
+            _build_skill_venv(version_dir)
+
+    except SkillImportError:
+        # Clean up partially imported version
+        if os.path.isdir(version_dir):
+            shutil.rmtree(version_dir)
+        # Clean up empty parent
+        parent = os.path.join(catalog_dir, meta.name)
+        if os.path.isdir(parent) and not os.listdir(parent):
+            os.rmdir(parent)
+        raise
+    except Exception as exc:
+        # Unexpected error — also clean up
+        if os.path.isdir(version_dir):
+            shutil.rmtree(version_dir)
+        parent = os.path.join(catalog_dir, meta.name)
+        if os.path.isdir(parent) and not os.listdir(parent):
+            os.rmdir(parent)
+        raise SkillImportError(f"Import failed: {exc}") from exc
 
     return version_dir
 
@@ -154,6 +194,8 @@ def install_skill_for_user(
     """Copy a skill from catalog to the user's skills directory.
 
     If *version* is None, installs the latest version.
+    Copies content selectively: SKILL.md, scripts/, references/, assets/,
+    requirements.txt — but **excludes .venv** (env lives in catalog only).
     Returns True on success. Raises FileNotFoundError if not in catalog.
     """
     catalog_dir = get_catalog_dir()
@@ -169,11 +211,22 @@ def install_skill_for_user(
             f"Skill '{skill_name}' version '{version}' not found in catalog"
         )
 
+    # Catalog completeness check — SKILL.md must exist (Phase M4-B)
+    catalog_skill_md = os.path.join(catalog_version_dir, "SKILL.md")
+    if not os.path.isfile(catalog_skill_md):
+        raise FileNotFoundError(
+            f"Catalog incomplete for '{skill_name}' v{version}: missing SKILL.md"
+        )
+
     user_skill = os.path.join(get_skills_dir(user_root), skill_name)
     if os.path.isdir(user_skill):
         shutil.rmtree(user_skill)
 
-    shutil.copytree(catalog_version_dir, user_skill)
+    shutil.copytree(
+        catalog_version_dir,
+        user_skill,
+        ignore=shutil.ignore_patterns(".venv"),
+    )
     return True
 
 
@@ -187,6 +240,70 @@ def uninstall_skill_for_user(user_root: str, skill_name: str) -> bool:
         shutil.rmtree(user_skill)
         return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Venv build helpers (Phase M4-B)
+# ---------------------------------------------------------------------------
+
+
+def _build_skill_venv(version_dir: str) -> None:
+    """Create a .venv inside *version_dir* and install requirements.txt.
+
+    Uses the same Python interpreter that is running the current process.
+    Raises SkillImportError if venv creation or pip install fails.
+    """
+    reqs_path = os.path.join(version_dir, "requirements.txt")
+    if not os.path.isfile(reqs_path):
+        return
+
+    venv_dir = os.path.join(version_dir, ".venv")
+    python = sys.executable
+
+    # Step 1: Create venv
+    logger.info("Creating .venv for skill at %s", version_dir)
+    try:
+        subprocess.run(
+            [python, "-m", "venv", venv_dir],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise SkillImportError(
+            f"Failed to create .venv: {exc}"
+        ) from exc
+
+    # Step 2: Install requirements
+    venv_pip = os.path.join(venv_dir, "bin", "pip")
+    if not os.path.isfile(venv_pip):
+        raise SkillImportError(
+            f"venv created but pip not found at {venv_pip}"
+        )
+
+    logger.info("Installing requirements for skill at %s", version_dir)
+    try:
+        subprocess.run(
+            [venv_pip, "install", "-r", reqs_path],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise SkillImportError(
+            f"pip install failed: {exc}"
+        ) from exc
+
+    # Step 3: Health check — venv python exists
+    venv_python = os.path.join(venv_dir, "bin", "python")
+    if not os.path.isfile(venv_python):
+        raise SkillImportError(
+            f"Health check failed: python not found at {venv_python}"
+        )
+
+    logger.info("Skill venv ready at %s", venv_dir)
 
 
 # ---------------------------------------------------------------------------

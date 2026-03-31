@@ -43,6 +43,10 @@ class AgentRun(Base):
         String(64), nullable=True,
         doc="Identifier of the worker that claimed this run",
     )
+    diagnostics: Mapped[Optional[dict]] = mapped_column(
+        JSONB, nullable=True,
+        doc="Runtime diagnostics: prompt layer sizes, message counts, plan state, total prompt tokens",
+    )
     error: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True,
         doc="Error message if status=failed",

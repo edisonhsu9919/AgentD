@@ -105,8 +105,10 @@ class TestModelConfigSchemas:
         mock.model_id = "test-model"
         mock.is_enabled = True
         mock.is_default = False
+        mock.model_type = "llm"
         mock.capabilities = None
         mock.timeout_seconds = None
+        mock.context_window = None
         mock.extra_params = None
         mock.created_at = datetime.now(timezone.utc)
         mock.updated_at = datetime.now(timezone.utc)
@@ -231,7 +233,7 @@ class TestSessionCreateModelOptional:
 class TestMigration009:
     def test_expected_schema_version(self):
         from main import EXPECTED_SCHEMA_VERSION
-        assert EXPECTED_SCHEMA_VERSION == "010"
+        assert EXPECTED_SCHEMA_VERSION == "013"
 
     def test_migration_file_exists(self):
         from pathlib import Path

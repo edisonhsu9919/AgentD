@@ -16,6 +16,8 @@ import SessionStatusIndicator from "@/components/chat/SessionStatusIndicator";
 import TaskPlanPanel from "@/components/task-plan/TaskPlanPanel";
 import FilePreview from "@/components/preview/FilePreview";
 import PolicySwitcher from "@/components/policy/PolicySwitcher";
+import ContextRingGauge from "@/components/chat/ContextRingGauge";
+import CompactBanner from "@/components/chat/CompactBanner";
 
 function ChatPageInner() {
   const router = useRouter();
@@ -43,6 +45,9 @@ function ChatPageInner() {
   const pendingPermissions = useChatStore((s) => s.pendingPermissions);
   const chatStatus = useChatStore((s) => s.status);
   const policy = useChatStore((s) => s.policy);
+  const runtime = useChatStore((s) => s.runtime);
+  const contextWarning = useChatStore((s) => s.contextWarning);
+  const justCompacted = useChatStore((s) => s.justCompacted);
 
   const fetchTree = useWorkspaceStore((s) => s.fetchTree);
   const clearSelection = useWorkspaceStore((s) => s.clearSelection);
@@ -210,6 +215,18 @@ function ChatPageInner() {
               {statusLabel[chatStatus] || chatStatus}
             </span>
             <SessionStatusIndicator />
+            {/* Context occupancy ring gauge — visible after at least one completed turn */}
+            {runtime &&
+              runtime.last_call_prompt_tokens != null &&
+              runtime.last_call_prompt_tokens > 0 &&
+              runtime.context_window_limit != null &&
+              runtime.context_usage_ratio != null && (
+                <ContextRingGauge
+                  ratio={runtime.context_usage_ratio}
+                  promptTokens={runtime.last_call_prompt_tokens}
+                  windowLimit={runtime.context_window_limit}
+                />
+              )}
           </div>
 
           {/* Policy mode indicator + switcher */}
@@ -237,6 +254,16 @@ function ChatPageInner() {
           chatStatus === "waiting" &&
           pendingPermissions.length === 0 && (
             <WaitingRecoveryBanner sessionId={currentSessionId} />
+          )}
+
+        {/* Compact banner: show when SSE context_warning or ratio > 0.7,
+            but suppress after a successful compact until next real model call */}
+        {!justCompacted &&
+          (contextWarning ||
+            (runtime?.context_usage_ratio != null &&
+              runtime.context_usage_ratio > 0.7)) &&
+          chatStatus === "idle" && (
+            <CompactBanner sessionId={currentSessionId} />
           )}
 
         {/* Input */}

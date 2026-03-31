@@ -20,6 +20,7 @@ from model_config.schemas import (
     RuntimeModelConfigResponse,
     _mask_api_key,
 )
+from model_config.service import invalidate_provider_cache
 
 router = APIRouter()
 runtime_router = APIRouter()  # Mounted separately at /api/admin/runtime
@@ -50,6 +51,7 @@ async def create_model_config(
     mc = await mc_svc.create_model_config(
         db,
         name=body.name,
+        model_type=body.model_type,
         provider_type=body.provider_type,
         base_url=body.base_url,
         api_key=body.api_key,
@@ -58,9 +60,11 @@ async def create_model_config(
         is_default=body.is_default,
         capabilities=body.capabilities,
         timeout_seconds=body.timeout_seconds,
+        context_window=body.context_window,
         extra_params=body.extra_params,
     )
     await db.commit()
+    invalidate_provider_cache()
     return ok(ModelConfigResponse.model_validate(mc).model_dump(mode="json"))
 
 
@@ -104,6 +108,7 @@ async def update_model_config(
     update_data = body.model_dump(exclude_none=True)
     updated = await mc_svc.update_model_config(db, config_id, **update_data)
     await db.commit()
+    invalidate_provider_cache()
     return ok(ModelConfigResponse.model_validate(updated).model_dump(mode="json"))
 
 
@@ -155,6 +160,7 @@ async def set_default_model_config(
             },
         )
     await db.commit()
+    invalidate_provider_cache()
     return ok(ModelConfigResponse.model_validate(mc).model_dump(mode="json"))
 
 
@@ -175,6 +181,7 @@ async def get_runtime_model_config(
         "base_url": resolved.base_url,
         "api_key_masked": _mask_api_key(resolved.api_key),
         "model_id": resolved.model_id,
+        "context_window": resolved.context_window,
     }
     if resolved.config_id:
         active["config_id"] = str(resolved.config_id)
@@ -189,6 +196,7 @@ async def get_runtime_model_config(
             "is_default": c.is_default,
         }
         for c in configs
+        if getattr(c, "model_type", "llm") == "llm"
     ]
 
     return ok(RuntimeModelConfigResponse(
@@ -196,6 +204,42 @@ async def get_runtime_model_config(
         active_config=active,
         available_configs=available,
     ).model_dump(mode="json"))
+
+
+@runtime_router.get("/vlm-config")
+async def get_runtime_vlm_config(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the currently active VLM config (or null if none)."""
+    resolved = await mc_svc.resolve_active_vlm_config(db)
+
+    if resolved is None:
+        return ok({
+            "available": False,
+            "source": None,
+            "active_config": None,
+            "message": "No VLM configured. Vision capabilities are unavailable.",
+        })
+
+    active = {
+        "source": resolved.source,
+        "name": resolved.name,
+        "base_url": resolved.base_url,
+        "api_key_masked": _mask_api_key(resolved.api_key),
+        "model_id": resolved.model_id,
+        "supports_vision": resolved.supports_vision,
+        "supports_http_image_url": resolved.supports_http_image_url,
+        "supports_data_uri_image": resolved.supports_data_uri_image,
+    }
+    if resolved.config_id:
+        active["config_id"] = str(resolved.config_id)
+
+    return ok({
+        "available": True,
+        "source": resolved.source,
+        "active_config": active,
+    })
 
 
 @runtime_router.get("/diagnostics")
@@ -227,9 +271,28 @@ async def get_runtime_diagnostics(
     except Exception:
         pass
 
-    # ── Model ─────────────────────────────────────────────────────────────
+    # ── LLM ──────────────────────────────────────────────────────────────
     resolved = await mc_svc.resolve_active_model_config(db)
     configs = await mc_svc.list_model_configs(db)
+
+    # ── VLM ──────────────────────────────────────────────────────────────
+    vlm_resolved = await mc_svc.resolve_active_vlm_config(db)
+    vlm_section: dict = {"available": False}
+    if vlm_resolved:
+        vlm_section = {
+            "available": True,
+            "source": vlm_resolved.source,
+            "name": vlm_resolved.name,
+            "model_id": vlm_resolved.model_id,
+            "base_url": vlm_resolved.base_url,
+            "api_key_masked": _mask_api_key(vlm_resolved.api_key),
+            "supports_vision": vlm_resolved.supports_vision,
+            "supports_http_image_url": vlm_resolved.supports_http_image_url,
+            "supports_data_uri_image": vlm_resolved.supports_data_uri_image,
+        }
+
+    llm_configs = [c for c in configs if getattr(c, "model_type", "llm") == "llm"]
+    vlm_configs = [c for c in configs if getattr(c, "model_type", "llm") == "vlm"]
 
     return ok({
         "instance": {
@@ -250,17 +313,26 @@ async def get_runtime_diagnostics(
             "model_id": resolved.model_id,
             "base_url": resolved.base_url,
             "api_key_masked": _mask_api_key(resolved.api_key),
+            "context_window": resolved.context_window,
         },
+        "vlm": vlm_section,
         "config_summary": {
             "total_configs": len(configs),
+            "llm_configs": len(llm_configs),
+            "vlm_configs": len(vlm_configs),
             "enabled_configs": sum(1 for c in configs if c.is_enabled),
-            "default_config": next(
-                (c.name for c in configs if c.is_default), None
+            "default_llm": next(
+                (c.name for c in llm_configs if c.is_default), None
+            ),
+            "default_vlm": next(
+                (c.name for c in vlm_configs if c.is_default), None
             ),
         },
         "env_fallback": {
             "local_llm_url": settings.local_llm_url,
             "default_model_id": settings.default_model_id,
+            "local_vlm_url": settings.local_vlm_url,
+            "default_vlm_id": settings.default_vlm_id,
             "workspace_root": settings.workspace_root,
             "db_pool_size": settings.db_pool_size,
             "db_max_overflow": settings.db_max_overflow,

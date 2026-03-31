@@ -21,10 +21,12 @@ interface ChatState {
   runtime: Runtime | null;
   policy: SessionPolicy | null;
   isLoading: boolean;
+  contextWarning: boolean;
+  justCompacted: boolean;
 
   fetchMessages: (sessionId: string) => Promise<void>;
   sendPrompt: (sessionId: string, content: string) => Promise<void>;
-  abortLoop: (sessionId: string) => Promise<void>;
+  cancelTask: (sessionId: string) => Promise<void>;
 
   // Runtime & Policy
   fetchRuntime: (sessionId: string) => Promise<Runtime | null>;
@@ -33,6 +35,11 @@ interface ChatState {
 
   // Permission recovery
   fetchPendingPermissions: (sessionId: string) => Promise<void>;
+
+  // Compaction
+  compactContext: (sessionId: string) => Promise<void>;
+  setContextWarning: (warning: boolean) => void;
+  clearJustCompacted: () => void;
 
   // SSE handlers
   appendStreamingDraft: (text: string) => void;
@@ -65,6 +72,8 @@ export const useChatStore = create<ChatState>((set) => ({
   runtime: null,
   policy: null,
   isLoading: false,
+  contextWarning: false,
+  justCompacted: false,
 
   fetchMessages: async (sessionId: string) => {
     set({ isLoading: true });
@@ -120,8 +129,48 @@ export const useChatStore = create<ChatState>((set) => ({
     }
   },
 
-  abortLoop: async (sessionId: string) => {
-    await apiFetch(`/sessions/${sessionId}/abort`, { method: "DELETE" });
+  cancelTask: async (sessionId: string) => {
+    await apiFetch(`/sessions/${sessionId}/cancel-task`, { method: "DELETE" });
+    // Post-cancel: clear all in-flight local state
+    set({
+      streamingDraft: "",
+      streamingThinking: "",
+      streamingToolCalls: [],
+      pendingPermissions: [],
+      status: "idle",
+    });
+    // Re-fetch backend truth
+    try {
+      const [messages, runtime] = await Promise.all([
+        apiFetch<Message[]>(`/sessions/${sessionId}/messages`),
+        apiFetch<Runtime>(`/sessions/${sessionId}/runtime`),
+      ]);
+      set({ messages, runtime, status: runtime.status });
+    } catch {
+      // best-effort
+    }
+  },
+
+  compactContext: async (sessionId: string) => {
+    await apiFetch(`/sessions/${sessionId}/compact`, { method: "POST" });
+    // Post-compact: refetch messages + runtime for updated state
+    try {
+      const [messages, runtime] = await Promise.all([
+        apiFetch<Message[]>(`/sessions/${sessionId}/messages`),
+        apiFetch<Runtime>(`/sessions/${sessionId}/runtime`),
+      ]);
+      set({ messages, runtime, status: runtime.status, contextWarning: false, justCompacted: true });
+    } catch {
+      // best-effort
+    }
+  },
+
+  setContextWarning: (warning: boolean) => {
+    set({ contextWarning: warning });
+  },
+
+  clearJustCompacted: () => {
+    set({ justCompacted: false });
   },
 
   fetchRuntime: async (sessionId: string) => {
@@ -270,6 +319,8 @@ export const useChatStore = create<ChatState>((set) => ({
       runtime: null,
       policy: null,
       isLoading: false,
+      contextWarning: false,
+      justCompacted: false,
     });
   },
 }));

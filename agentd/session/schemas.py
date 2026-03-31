@@ -65,6 +65,9 @@ class RuntimeResponse(BaseModel):
 
     Derived from existing tables (sessions, messages, permission_requests)
     — no new DB table required.
+
+    Phase L: includes current-round context occupancy from the latest
+    model response, enabling frontend "Prompt 3181 / 32768" display.
     """
 
     session_id: uuid.UUID
@@ -75,3 +78,15 @@ class RuntimeResponse(BaseModel):
     resumable: bool
     last_error: Optional[str] = None
     updated_at: datetime
+    # Context occupancy — from the latest model call's usage_metadata.
+    # NOTE: These values reflect the LAST COMPLETED model call, not real-time state.
+    # After compaction, the ratio will still show the pre-compaction value until the
+    # next model call completes. Frontend should use compaction_count or
+    # last_compaction_at to infer that a compaction just happened.
+    last_call_prompt_tokens: int = 0
+    last_call_completion_tokens: int = 0
+    context_window_limit: Optional[int] = None
+    context_usage_ratio: Optional[float] = None
+    # Phase N1: compaction state
+    last_compaction_at: Optional[datetime] = None
+    compaction_count: int = 0

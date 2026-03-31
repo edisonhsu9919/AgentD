@@ -3,6 +3,7 @@
 import { useState, KeyboardEvent } from "react";
 import { useChatStore } from "@/store/chat";
 import { useSessionStore } from "@/store/session";
+import { useTaskPlanStore } from "@/store/taskPlan";
 import { Send, Square } from "lucide-react";
 import { ApiRequestError } from "@/lib/api";
 
@@ -17,8 +18,9 @@ export default function PromptInput({ sessionId }: PromptInputProps) {
 
   const status = useChatStore((s) => s.status);
   const sendPrompt = useChatStore((s) => s.sendPrompt);
-  const abortLoop = useChatStore((s) => s.abortLoop);
+  const cancelTask = useChatStore((s) => s.cancelTask);
   const updateSessionStatus = useSessionStore((s) => s.updateSessionStatus);
+  const clearTaskPlan = useTaskPlanStore((s) => s.clearTaskPlan);
 
   const canSend = status === "idle" || status === "error";
   const canAbort = status === "running" || status === "queued" || status === "waiting";
@@ -52,7 +54,9 @@ export default function PromptInput({ sessionId }: PromptInputProps) {
 
   const handleAbort = async () => {
     try {
-      await abortLoop(sessionId);
+      await cancelTask(sessionId);
+      clearTaskPlan();
+      updateSessionStatus(sessionId, "idle");
     } catch {
       // ignore
     }

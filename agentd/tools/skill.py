@@ -1,17 +1,26 @@
-"""Filesystem-based SkillTool (Phase 6.7, §7.5, updated Phase H1).
+"""Filesystem-based SkillTool (Phase 6.7, §7.5, updated Phase H1 + M4-C).
 
 Skills are discovered from ``user_root/skills/{name}/SKILL.md``.
 The DB ``skills`` table is only used for catalog/audit, not runtime content.
 The ``user_skills`` table is checked for admin-level disable (Phase H1).
+
+Phase M4-C additions:
+  - ``skill load`` materializes bundled scripts to ``session_dir/scripts/``
+  - Registers script→env mappings in ``session_dir/.agentd/skill_envs.json``
 """
 
+import logging
 import os
+import shutil
 import uuid
 from typing import Any
 
 from tools.base import BaseTool, ToolContext
 from skills.filesystem import get_skills_dir
 from skills.package import parse_frontmatter, strip_frontmatter
+from skills.env import get_catalog_skill_env_bin, register_skill_scripts
+
+logger = logging.getLogger(__name__)
 
 # Backward-compat aliases for any external callers
 _parse_frontmatter = parse_frontmatter
@@ -70,7 +79,7 @@ class SkillTool(BaseTool):
                 return {"output": "name is required for action 'load'", "is_error": True}
             if skill_name in disabled:
                 return {"output": f"Skill '{skill_name}' is disabled for your account", "is_error": True}
-            return self._load_skill(skills_dir, skill_name)
+            return self._load_skill(skills_dir, skill_name, ctx)
 
         return {"output": f"Unknown action: {action}", "is_error": True}
 
@@ -122,14 +131,19 @@ class SkillTool(BaseTool):
 
         return {"output": skills, "is_error": False}
 
-    def _load_skill(self, skills_dir: str, skill_name: str) -> dict[str, Any]:
-        """Load a specific skill's SKILL.md content."""
+    def _load_skill(self, skills_dir: str, skill_name: str, ctx: ToolContext) -> dict[str, Any]:
+        """Load a specific skill's SKILL.md content.
+
+        Phase M4-C: also materializes bundled scripts to session_dir/scripts/
+        and registers script→env mappings in .agentd/skill_envs.json.
+        """
         # Prevent path traversal in skill name
         safe_name = os.path.basename(skill_name)
         if not safe_name or safe_name != skill_name:
             return {"output": "Invalid skill name", "is_error": True}
 
-        skill_md = os.path.join(skills_dir, safe_name, "SKILL.md")
+        skill_dir = os.path.join(skills_dir, safe_name)
+        skill_md = os.path.join(skill_dir, "SKILL.md")
         if not os.path.isfile(skill_md):
             return {"output": f"Skill not found: {skill_name}", "is_error": True}
 
@@ -141,12 +155,78 @@ class SkillTool(BaseTool):
 
         meta = _parse_frontmatter(content)
         version = meta.get("version", "0.1.0")
+        resolved_name = meta.get("name", skill_name)
+
+        # Phase M4-C: materialize scripts + register env mapping
+        self._materialize_skill_scripts(skill_dir, resolved_name, version, ctx)
 
         return {
             "action": "load",
             "content": content,
-            "skill_name": meta.get("name", skill_name),
+            "skill_name": resolved_name,
             "skill_version": version,
             "output": f"[Skill: {skill_name} v{version}]\n\n{content}",
             "is_error": False,
         }
+
+    @staticmethod
+    def _materialize_skill_scripts(
+        skill_dir: str,
+        skill_name: str,
+        skill_version: str,
+        ctx: ToolContext,
+    ) -> None:
+        """Copy bundled scripts to session_dir and register env mappings.
+
+        - Copies ``skill_dir/scripts/*.py`` → ``session_dir/scripts/``
+        - Resolves catalog env_bin for this skill/version
+        - Writes mappings to ``session_dir/.agentd/skill_envs.json``
+
+        Failures are logged but do not block skill load (best-effort).
+        """
+        src_scripts = os.path.join(skill_dir, "scripts")
+        if not os.path.isdir(src_scripts):
+            return
+
+        try:
+            dst_scripts = os.path.join(ctx.session_dir, "scripts")
+            os.makedirs(dst_scripts, exist_ok=True)
+
+            # Collect relative paths of copied scripts
+            materialized: list[str] = []
+            for entry in os.listdir(src_scripts):
+                src_file = os.path.join(src_scripts, entry)
+                if not os.path.isfile(src_file):
+                    continue
+                dst_file = os.path.join(dst_scripts, entry)
+                shutil.copy2(src_file, dst_file)
+                materialized.append(f"scripts/{entry}")
+
+            if not materialized:
+                return
+
+            # Resolve catalog env_bin
+            env_bin = get_catalog_skill_env_bin(skill_name, skill_version)
+
+            if env_bin:
+                register_skill_scripts(
+                    ctx.session_dir,
+                    skill_name,
+                    skill_version,
+                    env_bin,
+                    materialized,
+                )
+                logger.info(
+                    "Materialized %d scripts for skill %s v%s, env_bin=%s",
+                    len(materialized), skill_name, skill_version, env_bin,
+                )
+            else:
+                logger.info(
+                    "Materialized %d scripts for skill %s v%s (no catalog env)",
+                    len(materialized), skill_name, skill_version,
+                )
+        except Exception:
+            logger.warning(
+                "Failed to materialize scripts for skill %s", skill_name,
+                exc_info=True,
+            )

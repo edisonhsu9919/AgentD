@@ -13,6 +13,7 @@ export default function SettingsPage() {
     healthLoading,
     configs,
     configsLoading,
+    vlmConfig,
     diagnostics,
     diagnosticsLoading,
     editingConfig,
@@ -22,6 +23,7 @@ export default function SettingsPage() {
     fetchHealth,
     fetchConfigs,
     fetchRuntimeConfig,
+    fetchVLMConfig,
     fetchDiagnostics,
     openCreateEditor,
     openEditEditor,
@@ -37,7 +39,8 @@ export default function SettingsPage() {
     fetchHealth();
     fetchConfigs();
     fetchRuntimeConfig();
-  }, [fetchHealth, fetchConfigs, fetchRuntimeConfig]);
+    fetchVLMConfig();
+  }, [fetchHealth, fetchConfigs, fetchRuntimeConfig, fetchVLMConfig]);
 
   const showEditor = isCreating || editingConfig !== null;
 
@@ -46,7 +49,7 @@ export default function SettingsPage() {
       {/* Main content */}
       <div className="flex-1 overflow-y-auto px-6 py-4">
         <div className="mx-auto max-w-4xl space-y-4">
-          <RuntimeStatus health={health} loading={healthLoading} />
+          <RuntimeStatus health={health} loading={healthLoading} vlmConfig={vlmConfig} />
 
           <ModelConfigList
             configs={configs}

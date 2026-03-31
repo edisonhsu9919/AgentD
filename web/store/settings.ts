@@ -7,6 +7,7 @@ import type {
   ModelConfigCreate,
   ModelConfigUpdate,
   RuntimeModelConfigData,
+  VLMConfigResponse,
   DiagnosticsData,
 } from "@/lib/types";
 
@@ -24,6 +25,10 @@ interface SettingsState {
   // Runtime model config
   runtimeConfig: RuntimeModelConfigData | null;
   fetchRuntimeConfig: () => Promise<void>;
+
+  // VLM config
+  vlmConfig: VLMConfigResponse | null;
+  fetchVLMConfig: () => Promise<void>;
 
   // Diagnostics
   diagnostics: DiagnosticsData | null;
@@ -56,6 +61,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   configs: [],
   configsLoading: false,
   runtimeConfig: null,
+  vlmConfig: null,
   diagnostics: null,
   diagnosticsLoading: false,
   editingConfig: null,
@@ -91,6 +97,17 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         "/admin/runtime/model-config",
       );
       set({ runtimeConfig: data });
+    } catch {
+      // silent
+    }
+  },
+
+  fetchVLMConfig: async () => {
+    try {
+      const data = await apiFetch<VLMConfigResponse>(
+        "/admin/runtime/vlm-config",
+      );
+      set({ vlmConfig: data });
     } catch {
       // silent
     }
@@ -186,7 +203,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   refreshStatus: async () => {
-    const { fetchHealth, fetchConfigs, fetchRuntimeConfig } = get();
-    await Promise.all([fetchHealth(), fetchConfigs(), fetchRuntimeConfig()]);
+    const { fetchHealth, fetchConfigs, fetchRuntimeConfig, fetchVLMConfig } = get();
+    await Promise.all([fetchHealth(), fetchConfigs(), fetchRuntimeConfig(), fetchVLMConfig()]);
   },
 }));

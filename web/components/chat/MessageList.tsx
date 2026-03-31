@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useChatStore } from "@/store/chat";
 import MessageBubble from "./MessageBubble";
+import SummaryDivider from "./SummaryDivider";
 import ToolCallBlock from "./ToolCallBlock";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -199,10 +200,14 @@ export default function MessageList() {
 
   return (
     <div className="min-w-0 flex-1 overflow-y-auto px-4 py-4">
-      {/* Persisted messages */}
-      {messages.map((msg) => (
-        <MessageBubble key={msg.id} message={msg} toolInfoMap={toolInfoMap} />
-      ))}
+      {/* Persisted messages — is_summary renders as SummaryDivider inline */}
+      {messages.map((msg) =>
+        msg.is_summary ? (
+          <SummaryDivider key={msg.id} message={msg} />
+        ) : (
+          <MessageBubble key={msg.id} message={msg} toolInfoMap={toolInfoMap} />
+        ),
+      )}
 
       {/* Queued indicator */}
       {status === "queued" && !hasStreaming && (

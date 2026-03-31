@@ -158,6 +158,17 @@ async def mark_cancelled(db: AsyncSession, run_id: uuid.UUID) -> None:
     await db.flush()
 
 
+async def update_diagnostics(db: AsyncSession, run_id: uuid.UUID, diagnostics: dict) -> None:
+    """Store runtime diagnostics for a run (Phase L: prompt continuity tracking)."""
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        sql_update(AgentRun)
+        .where(AgentRun.id == run_id)
+        .values(diagnostics=diagnostics, updated_at=now)
+    )
+    await db.flush()
+
+
 # ── Lease management ─────────────────────────────────────────────────────
 
 

@@ -69,6 +69,21 @@ class Settings(BaseSettings):
         description="Context window size in tokens for the default model.",
     )
 
+    # ── VLM (Vision-Language Model, OpenAI-compatible API) ───────────────────
+    # Parallel to LLM settings. Empty local_vlm_url means no VLM configured.
+    local_vlm_url: str = Field(
+        default="",
+        description="Base URL of the OpenAI-compatible VLM API. Empty = no VLM.",
+    )
+    vlm_api_key: str = Field(
+        default="",
+        description="API key for the VLM endpoint.",
+    )
+    default_vlm_id: str = Field(
+        default="",
+        description="Default VLM model identifier (e.g. 'qwen3-vl-flash').",
+    )
+
     # ── Workspace ───────────────────────────────────────────────────────────
     workspace_root: str = Field(
         default="/tmp/agentd/workspaces",
@@ -102,10 +117,10 @@ class Settings(BaseSettings):
 
     # ── App ──────────────────────────────────────────────────────────────────
     app_title: str = "AgentD"
-    app_version: str = "0.3.0"
-    debug: bool = Field(
-        default=False,
-        description="Enable debug mode. Set to true for local development only.",
+    app_version: str = "0.3.1"
+    debug: str = Field(
+        default="",
+        description="Debug flag. Any non-empty value enables debug logging (e.g. 'true', 'release').",
     )
 
     # ── Seed admin ──────────────────────────────────────────────────────────

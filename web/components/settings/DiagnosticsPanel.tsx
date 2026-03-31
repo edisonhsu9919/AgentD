@@ -126,7 +126,7 @@ export default function DiagnosticsPanel({
               />
             </DiagSection>
 
-            <DiagSection title="Model">
+            <DiagSection title="LLM Model">
               <DiagRow label="Source" value={diagnostics.model.source} />
               <DiagRow label="Name" value={diagnostics.model.name} />
               <DiagRow label="Model ID" value={diagnostics.model.model_id} />
@@ -135,6 +135,45 @@ export default function DiagnosticsPanel({
                 label="API Key"
                 value={diagnostics.model.api_key_masked}
               />
+              <DiagRow
+                label="Context Window"
+                value={diagnostics.model.context_window?.toLocaleString() ?? "\u2014"}
+              />
+            </DiagSection>
+
+            <DiagSection title="VLM Model">
+              <DiagRow
+                label="Available"
+                value={diagnostics.vlm.available ? "Yes" : "No"}
+                ok={diagnostics.vlm.available}
+              />
+              {diagnostics.vlm.available && (
+                <>
+                  <DiagRow label="Source" value={diagnostics.vlm.source || "\u2014"} />
+                  <DiagRow label="Name" value={diagnostics.vlm.name || "\u2014"} />
+                  <DiagRow label="Model ID" value={diagnostics.vlm.model_id || "\u2014"} />
+                  <DiagRow label="Base URL" value={diagnostics.vlm.base_url || "\u2014"} />
+                  <DiagRow
+                    label="API Key"
+                    value={diagnostics.vlm.api_key_masked || "\u2014"}
+                  />
+                  <DiagRow
+                    label="Vision"
+                    value={diagnostics.vlm.supports_vision ? "Yes" : "No"}
+                    ok={diagnostics.vlm.supports_vision}
+                  />
+                  <DiagRow
+                    label="HTTP Image URL"
+                    value={diagnostics.vlm.supports_http_image_url ? "Yes" : "No"}
+                    ok={diagnostics.vlm.supports_http_image_url}
+                  />
+                  <DiagRow
+                    label="Data URI Image"
+                    value={diagnostics.vlm.supports_data_uri_image ? "Yes" : "No"}
+                    ok={diagnostics.vlm.supports_data_uri_image}
+                  />
+                </>
+              )}
             </DiagSection>
 
             <DiagSection title="Config Summary">
@@ -143,12 +182,24 @@ export default function DiagnosticsPanel({
                 value={diagnostics.config_summary.total_configs.toString()}
               />
               <DiagRow
+                label="LLM Configs"
+                value={diagnostics.config_summary.llm_configs.toString()}
+              />
+              <DiagRow
+                label="VLM Configs"
+                value={diagnostics.config_summary.vlm_configs.toString()}
+              />
+              <DiagRow
                 label="Enabled"
                 value={diagnostics.config_summary.enabled_configs.toString()}
               />
               <DiagRow
-                label="Default"
-                value={diagnostics.config_summary.default_config || "\u2014"}
+                label="Default LLM"
+                value={diagnostics.config_summary.default_llm || "\u2014"}
+              />
+              <DiagRow
+                label="Default VLM"
+                value={diagnostics.config_summary.default_vlm || "\u2014"}
               />
             </DiagSection>
 
@@ -158,8 +209,16 @@ export default function DiagnosticsPanel({
                 value={diagnostics.env_fallback.local_llm_url}
               />
               <DiagRow
-                label="Default Model"
+                label="Default LLM ID"
                 value={diagnostics.env_fallback.default_model_id}
+              />
+              <DiagRow
+                label="VLM URL"
+                value={diagnostics.env_fallback.local_vlm_url || "\u2014"}
+              />
+              <DiagRow
+                label="Default VLM ID"
+                value={diagnostics.env_fallback.default_vlm_id || "\u2014"}
               />
               <DiagRow
                 label="Workspace Root"

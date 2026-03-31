@@ -106,8 +106,39 @@ class PlanningTool(BaseTool):
                 "plan": plan,
             })
 
-        step_summary = ", ".join(f"[{s['status']}] {s['title']}" for s in steps)
         return {
-            "output": f"Task plan created: {task_title}\nSteps: {step_summary}",
+            "output": _format_plan_output("created", plan),
             "is_error": False,
         }
+
+
+def _format_plan_output(action: str, plan: dict) -> str:
+    """Format full plan state for ToolMessage output.
+
+    Phase L prompt strategy: since Task Plan is no longer injected into the
+    system prompt, the model recovers plan state from the most recent
+    planning/todo_update ToolMessage in the conversation flow.
+    This output must contain the COMPLETE step list with statuses.
+    """
+    task = plan.get("task", {})
+    steps = plan.get("steps", [])
+    active = plan.get("active", True)
+
+    parts: list[str] = []
+    parts.append(f"## Task Plan ({action})\n")
+    if task.get("title"):
+        parts.append(f"**Task:** {task['title']}")
+    if task.get("summary"):
+        parts.append(f"**Summary:** {task['summary']}")
+    parts.append(f"**Status:** {'active' if active else 'completed'}\n")
+
+    parts.append("### Steps\n")
+    for s in steps:
+        icon = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]"}.get(
+            s.get("status", "pending"), "[ ]"
+        )
+        parts.append(f"- {icon} {s.get('title', '???')}")
+        if s.get("status") == "in_progress" and s.get("detail"):
+            parts.append(f"  Detail: {s['detail']}")
+
+    return "\n".join(parts)

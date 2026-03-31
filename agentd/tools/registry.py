@@ -52,6 +52,7 @@ class ToolRegistry:
     _DEFAULT_PERMISSIONS: dict[str, str] = {
         "bash": "ask",
         "file_read": "allow",
+        "file_inspect": "allow",
         "file_write": "ask",
         "file_edit": "ask",
         "skill": "allow",
@@ -133,12 +134,14 @@ def _register_defaults(registry: ToolRegistry) -> None:
     from tools.list_dir import ListDirTool
     from tools.planning import PlanningTool
     from tools.skill import SkillTool
+    from tools.file_inspect import FileInspectTool
     from tools.todo_update import TodoUpdateTool
 
     registry.register(BashTool())
     registry.register(FileReadTool())
     registry.register(FileWriteTool())
     registry.register(FileEditTool())
+    registry.register(FileInspectTool())
     registry.register(SkillTool())
     registry.register(ListDirTool())
     registry.register(GlobTool())

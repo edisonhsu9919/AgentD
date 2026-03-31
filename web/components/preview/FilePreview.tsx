@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useWorkspaceStore } from "@/store/workspace";
+import { useSettingsStore } from "@/store/settings";
 import { apiFetch, apiFetchRaw } from "@/lib/api";
 import type { FileMeta } from "@/lib/types";
 import {
@@ -11,7 +12,29 @@ import {
   Image as ImageIcon,
   FileSpreadsheet,
   File,
+  Eye,
+  EyeOff,
 } from "lucide-react";
+
+function VLMHint({ available }: { available: boolean | null }) {
+  if (available === null) return null;
+  return (
+    <div
+      className={`mt-2 flex items-center gap-1.5 rounded px-2 py-1 text-[10px] ${
+        available
+          ? "bg-purple-500/10 text-purple-400"
+          : "bg-bg-tertiary/50 text-text-secondary/50"
+      }`}
+    >
+      {available ? <Eye size={11} /> : <EyeOff size={11} />}
+      <span>
+        {available
+          ? "Vision understanding available"
+          : "Vision understanding not available"}
+      </span>
+    </div>
+  );
+}
 
 interface FilePreviewProps {
   sessionId: string;
@@ -22,6 +45,13 @@ export default function FilePreview({ sessionId }: FilePreviewProps) {
   const fileMeta = useWorkspaceStore((s) => s.fileMeta);
   const clearSelection = useWorkspaceStore((s) => s.clearSelection);
   const downloadFile = useWorkspaceStore((s) => s.downloadFile);
+  const vlmConfig = useSettingsStore((s) => s.vlmConfig);
+  const fetchVLMConfig = useSettingsStore((s) => s.fetchVLMConfig);
+
+  // Fetch VLM config once to know if vision is available
+  useEffect(() => {
+    if (!vlmConfig) fetchVLMConfig();
+  }, [vlmConfig, fetchVLMConfig]);
 
   const [textContent, setTextContent] = useState<string | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
@@ -142,11 +172,14 @@ export default function FilePreview({ sessionId }: FilePreviewProps) {
         )}
 
         {!loading && fileMeta.preview_mode === "image" && imageUrl && (
-          <img
-            src={imageUrl}
-            alt={fileMeta.name}
-            className="max-w-full rounded"
-          />
+          <>
+            <img
+              src={imageUrl}
+              alt={fileMeta.name}
+              className="max-w-full rounded"
+            />
+            <VLMHint available={vlmConfig?.available ?? null} />
+          </>
         )}
 
         {!loading && fileMeta.preview_mode === "pdf" && (
@@ -159,6 +192,7 @@ export default function FilePreview({ sessionId }: FilePreviewProps) {
             >
               Download to view
             </button>
+            <VLMHint available={vlmConfig?.available ?? null} />
           </div>
         )}
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { Plus, Edit2, Star, Power, PowerOff } from "lucide-react";
+import { Plus, Edit2, Star, Power, PowerOff, Eye } from "lucide-react";
 import type { ModelConfig } from "@/lib/types";
 
 interface ModelConfigListProps {
@@ -61,6 +61,21 @@ export default function ModelConfigList({
                   <span className="truncate text-xs font-medium text-text-primary">
                     {config.name}
                   </span>
+                  <span
+                    className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                      config.model_type === "vlm"
+                        ? "bg-purple-500/10 text-purple-400"
+                        : "bg-blue-500/10 text-blue-400"
+                    }`}
+                  >
+                    {config.model_type === "vlm" ? "VLM" : "LLM"}
+                  </span>
+                  {config.model_type === "vlm" && (
+                    <span className="flex items-center gap-0.5 rounded bg-purple-500/10 px-1.5 py-0.5 text-[10px] text-purple-400">
+                      <Eye size={9} />
+                      Vision
+                    </span>
+                  )}
                   {config.is_default && (
                     <span className="flex items-center gap-0.5 rounded bg-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-accent">
                       <Star size={9} />

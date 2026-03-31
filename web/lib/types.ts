@@ -212,6 +212,20 @@ export interface SSEError {
   timestamp: string;
 }
 
+export interface SSEContextWarning {
+  event: "context_warning";
+  session_id: string;
+  context_usage_ratio: number;
+  timestamp: string;
+}
+
+export interface SSECompactionDone {
+  event: "compaction_done";
+  session_id: string;
+  tokens_saved: number;
+  timestamp: string;
+}
+
 export type SSEEvent =
   | SSETextDelta
   | SSEToolStart
@@ -222,7 +236,9 @@ export type SSEEvent =
   | SSETitleUpdate
   | SSEReasoningDelta
   | SSEDone
-  | SSEError;
+  | SSEError
+  | SSEContextWarning
+  | SSECompactionDone;
 
 // --- Workspace ---
 
@@ -259,6 +275,12 @@ export interface Runtime {
   resumable: boolean;
   last_error: string | null;
   updated_at: string;
+  last_call_prompt_tokens: number | null;
+  last_call_completion_tokens: number | null;
+  context_window_limit: number | null;
+  context_usage_ratio: number | null;
+  last_compaction_at: string | null;
+  compaction_count: number;
 }
 
 // --- Policy ---
@@ -438,6 +460,7 @@ export interface HealthResponse {
 export interface ModelConfig {
   id: string;
   name: string;
+  model_type: "llm" | "vlm";
   provider_type: string;
   base_url: string;
   api_key_masked: string;
@@ -446,6 +469,7 @@ export interface ModelConfig {
   is_default: boolean;
   capabilities: Record<string, unknown> | null;
   timeout_seconds: number | null;
+  context_window: number | null;
   extra_params: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
@@ -453,23 +477,29 @@ export interface ModelConfig {
 
 export interface ModelConfigCreate {
   name: string;
+  model_type?: "llm" | "vlm";
   provider_type?: string;
   base_url: string;
   api_key?: string;
   model_id: string;
   is_enabled?: boolean;
   is_default?: boolean;
+  capabilities?: Record<string, unknown> | null;
   timeout_seconds?: number | null;
+  context_window?: number | null;
 }
 
 export interface ModelConfigUpdate {
   name?: string;
+  model_type?: "llm" | "vlm";
   provider_type?: string;
   base_url?: string;
   api_key?: string;
   model_id?: string;
   is_enabled?: boolean;
+  capabilities?: Record<string, unknown> | null;
   timeout_seconds?: number | null;
+  context_window?: number | null;
 }
 
 // --- Runtime Model Config (Phase I2) ---
@@ -481,6 +511,7 @@ export interface RuntimeActiveConfig {
   api_key_masked: string;
   model_id: string;
   config_id?: string;
+  context_window?: number | null;
 }
 
 export interface RuntimeModelConfigData {
@@ -495,7 +526,28 @@ export interface RuntimeModelConfigData {
   }>;
 }
 
-// --- Diagnostics (Phase I4) ---
+// --- VLM Config (Phase O3) ---
+
+export interface VLMActiveConfig {
+  source: string;
+  name: string;
+  base_url: string;
+  api_key_masked: string;
+  model_id: string;
+  supports_vision: boolean;
+  supports_http_image_url: boolean;
+  supports_data_uri_image: boolean;
+  config_id?: string;
+}
+
+export interface VLMConfigResponse {
+  available: boolean;
+  source: string | null;
+  active_config: VLMActiveConfig | null;
+  message?: string;
+}
+
+// --- Diagnostics (Phase I4 + O3) ---
 
 export interface DiagnosticsData {
   instance: {
@@ -516,15 +568,32 @@ export interface DiagnosticsData {
     model_id: string;
     base_url: string;
     api_key_masked: string;
+    context_window: number | null;
+  };
+  vlm: {
+    available: boolean;
+    source?: string;
+    name?: string;
+    model_id?: string;
+    base_url?: string;
+    api_key_masked?: string;
+    supports_vision?: boolean;
+    supports_http_image_url?: boolean;
+    supports_data_uri_image?: boolean;
   };
   config_summary: {
     total_configs: number;
+    llm_configs: number;
+    vlm_configs: number;
     enabled_configs: number;
-    default_config: string | null;
+    default_llm: string | null;
+    default_vlm: string | null;
   };
   env_fallback: {
     local_llm_url: string;
     default_model_id: string;
+    local_vlm_url: string;
+    default_vlm_id: string;
     workspace_root: string;
     db_pool_size: number;
     db_max_overflow: number;

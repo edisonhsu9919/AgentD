@@ -24,6 +24,7 @@ def _mask_api_key(key: str) -> str:
 
 class ModelConfigCreate(BaseModel):
     name: str = Field(..., max_length=128)
+    model_type: str = Field(default="llm", max_length=16, description="'llm' or 'vlm'")
     provider_type: str = Field(default="openai_compatible", max_length=32)
     base_url: str = Field(..., max_length=512)
     api_key: str = Field(default="", max_length=512)
@@ -32,11 +33,13 @@ class ModelConfigCreate(BaseModel):
     is_default: bool = False
     capabilities: Optional[dict[str, Any]] = None
     timeout_seconds: Optional[int] = Field(None, ge=1, le=600)
+    context_window: Optional[int] = Field(None, ge=1024, le=10_000_000, description="Context window size in tokens")
     extra_params: Optional[dict[str, Any]] = None
 
 
 class ModelConfigUpdate(BaseModel):
     name: Optional[str] = Field(None, max_length=128)
+    model_type: Optional[str] = Field(None, max_length=16)
     provider_type: Optional[str] = Field(None, max_length=32)
     base_url: Optional[str] = Field(None, max_length=512)
     api_key: Optional[str] = Field(None, max_length=512)
@@ -44,6 +47,7 @@ class ModelConfigUpdate(BaseModel):
     is_enabled: Optional[bool] = None
     capabilities: Optional[dict[str, Any]] = None
     timeout_seconds: Optional[int] = Field(None, ge=1, le=600)
+    context_window: Optional[int] = Field(None, ge=1024, le=10_000_000, description="Context window size in tokens")
     extra_params: Optional[dict[str, Any]] = None
 
 
@@ -53,6 +57,7 @@ class ModelConfigUpdate(BaseModel):
 class ModelConfigResponse(BaseModel):
     id: uuid.UUID
     name: str
+    model_type: str = "llm"
     provider_type: str
     base_url: str
     api_key_masked: str = ""
@@ -61,6 +66,7 @@ class ModelConfigResponse(BaseModel):
     is_default: bool
     capabilities: Optional[dict[str, Any]] = None
     timeout_seconds: Optional[int] = None
+    context_window: Optional[int] = None
     extra_params: Optional[dict[str, Any]] = None
     created_at: datetime
     updated_at: datetime
@@ -81,6 +87,7 @@ class ModelConfigResponse(BaseModel):
             d = {
                 "id": data.id,
                 "name": data.name,
+                "model_type": getattr(data, "model_type", "llm"),
                 "provider_type": data.provider_type,
                 "base_url": data.base_url,
                 "api_key_masked": _mask_api_key(raw),
@@ -89,6 +96,7 @@ class ModelConfigResponse(BaseModel):
                 "is_default": data.is_default,
                 "capabilities": data.capabilities,
                 "timeout_seconds": data.timeout_seconds,
+                "context_window": getattr(data, "context_window", None),
                 "extra_params": data.extra_params,
                 "created_at": data.created_at,
                 "updated_at": data.updated_at,

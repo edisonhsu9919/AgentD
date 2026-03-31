@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
-from api.deps import get_current_user
+from api.deps import get_current_user, require_admin
 from auth.models import User
 from core.database import get_db
 from core.response import ok, ok_list
@@ -166,6 +166,51 @@ async def get_runtime(
     # Resumable: currently only when waiting for permission
     resumable = session.status == "waiting" and pending_count > 0
 
+    # Phase L: fetch latest run diagnostics for context occupancy
+    ctx_prompt = 0
+    ctx_completion = 0
+    ctx_window = None
+    ctx_ratio = None
+    try:
+        from agent.run_models import AgentRun
+        from sqlalchemy import select as sa_select
+
+        stmt = (
+            sa_select(AgentRun)
+            .where(AgentRun.session_id == session_id)
+            .where(AgentRun.diagnostics.isnot(None))
+            .order_by(AgentRun.updated_at.desc())
+            .limit(1)
+        )
+        last_run = (await db.execute(stmt)).scalar_one_or_none()
+        if last_run and last_run.diagnostics:
+            diag = last_run.diagnostics
+            ctx_prompt = diag.get("last_call_prompt_tokens", 0)
+            ctx_completion = diag.get("last_call_completion_tokens", 0)
+            ctx_window = diag.get("context_window_limit")
+            ctx_ratio = diag.get("context_usage_ratio")
+    except Exception:
+        pass  # Graceful fallback — no diagnostics available yet
+
+    # Phase N1: read compaction state from context_summary.json
+    last_compaction_at = None
+    compaction_count = 0
+    try:
+        from datetime import datetime as _dt
+        from workspace.manager import get_session_dir
+
+        session_dir = get_session_dir(current_user.workspace, str(session_id))
+        summary_path = os.path.join(session_dir, ".agentd", "context_summary.json")
+        if os.path.isfile(summary_path):
+            with open(summary_path, "r", encoding="utf-8") as f:
+                cs = json.load(f)
+            ts = cs.get("compacted_at")
+            if ts:
+                last_compaction_at = _dt.fromisoformat(ts)
+            compaction_count = cs.get("compaction_count", 1)
+    except Exception:
+        pass
+
     runtime = RuntimeResponse(
         session_id=session.id,
         status=session.status,
@@ -175,6 +220,12 @@ async def get_runtime(
         resumable=resumable,
         last_error=None,  # Phase A: to be enhanced later
         updated_at=session.updated_at,
+        last_call_prompt_tokens=ctx_prompt,
+        last_call_completion_tokens=ctx_completion,
+        context_window_limit=ctx_window,
+        context_usage_ratio=ctx_ratio,
+        last_compaction_at=last_compaction_at,
+        compaction_count=compaction_count,
     )
     return ok(runtime.model_dump(mode="json"))
 
@@ -499,3 +550,174 @@ async def abort_session(
     await db.commit()
 
     return ok({"aborted": True})
+
+
+# ── Unified task cancellation (Phase L) ──────────────────────────────────────
+
+
+@router.delete("/{session_id}/cancel-task")
+async def cancel_task(
+    session_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Unified task cancellation: stop current run + clear plan + reset state.
+
+    Phase L: Combines abort + plan reset into a single atomic operation,
+    ensuring the session returns to a clean state without residual plan context.
+
+    Handles all session states:
+    - queued: cancel queued runs, reset to idle
+    - waiting: cancel pending permissions, reset to idle
+    - running: enqueue abort for the worker
+    - idle/error: no-op for abort, still clears plan
+    """
+    from agent.scheduler import cancel_queued_runs, enqueue_abort
+    from core.events import event_bus
+    from workspace.manager import get_session_dir
+
+    session = await session_svc.get_session(db, session_id)
+    if not session or session.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Session not found"},
+        )
+
+    result = {"aborted": False, "plan_cleared": False, "status": session.status}
+
+    # 1. Stop current run (if active)
+    if session.status in ("running", "waiting", "queued"):
+        await cancel_queued_runs(db, session_id)
+
+        if session.status in ("queued", "waiting"):
+            # No active worker — cancel permissions + reset directly
+            from permission import service as perm_svc
+            await perm_svc.cancel_pending_by_session(db, session_id)
+            await session_svc.update_session_status(db, session_id, "idle")
+            result["status"] = "idle"
+            # Notify any connected SSE listeners
+            await event_bus.publish(str(session_id), {
+                "event": "status_change", "status": "idle",
+            })
+        else:
+            # Running: enqueue abort for the worker to pick up
+            await enqueue_abort(db, session_id)
+
+        result["aborted"] = True
+
+    # 2. Clear task plan
+    session_dir = get_session_dir(current_user.workspace, str(session_id))
+    plan_path = os.path.join(session_dir, ".agentd", "task_plan.json")
+    if os.path.isfile(plan_path):
+        os.remove(plan_path)
+        result["plan_cleared"] = True
+
+    await db.commit()
+    return ok(result)
+
+
+# ── Context compaction (Phase N1) ─────────────────────────────────────────────
+
+
+@router.post("/{session_id}/compact")
+async def compact_session(
+    session_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Manually trigger context compaction for a session.
+
+    Phase N1: Only allowed when session is idle — prevents conflicts with
+    an active agent run that may be reading/writing checkpoint state.
+    """
+    from agent.compaction import compact_session as do_compact
+    from agent.runtime import build_agent
+    from core.events import event_bus
+    from workspace.manager import get_session_dir
+
+    session = await session_svc.get_session(db, session_id)
+    if not session or session.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Session not found"},
+        )
+
+    if session.status != "idle":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "CONFLICT",
+                "message": f"Cannot compact while session is {session.status}",
+            },
+        )
+
+    session_dir = get_session_dir(current_user.workspace, str(session_id))
+
+    # Build agent to access checkpoint state
+    agent = await build_agent(
+        session_id=str(session_id),
+        user_id=str(current_user.id),
+        user_root=current_user.workspace,
+        session_dir=session_dir,
+        agent_id=session.agent_id,
+        model_id=session.model_id,
+    )
+    config = {"configurable": {"thread_id": str(session_id)}}
+
+    result = await do_compact(
+        agent=agent,
+        config=config,
+        session_id=str(session_id),
+        session_dir=session_dir,
+        model_id=session.model_id,
+        publish=event_bus.publish,
+    )
+
+    return ok(result)
+
+
+# ── Run history (Phase L — admin diagnostics) ──────────────────────────────
+
+
+@router.get("/{session_id}/runs")
+async def list_session_runs(
+    session_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    """List all agent runs for a session with payload, diagnostics, and status.
+
+    Phase L: Admin-only endpoint for prompt continuity analysis and debugging.
+    Returns runs ordered by created_at ascending (chronological).
+    """
+    from agent.run_models import AgentRun
+    from sqlalchemy import select
+
+    session = await session_svc.get_session(db, session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Session not found"},
+        )
+
+    stmt = (
+        select(AgentRun)
+        .where(AgentRun.session_id == session_id)
+        .order_by(AgentRun.created_at.asc())
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+
+    return ok([
+        {
+            "id": str(r.id),
+            "run_type": r.run_type,
+            "status": r.status,
+            "worker_id": r.worker_id,
+            "payload": r.payload,
+            "diagnostics": r.diagnostics,
+            "error": r.error,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+        }
+        for r in rows
+    ])

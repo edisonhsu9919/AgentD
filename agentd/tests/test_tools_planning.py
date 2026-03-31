@@ -177,8 +177,8 @@ class TestTodoUpdateTool:
             {"id": "s2", "title": "Step 2", "status": "in_progress"},
         ])
         assert result["is_error"] is False
-        assert "completed=1" in result["output"]
-        assert "in_progress=1" in result["output"]
+        assert "[x] Step 1" in result["output"]
+        assert "[>] Step 2" in result["output"]
 
         plan = json.loads((workspace / ".agentd" / "task_plan.json").read_text())
         assert plan["steps"][0]["status"] == "completed"
@@ -196,7 +196,7 @@ class TestTodoUpdateTool:
             {"id": "s1", "title": "Step 1", "status": "completed"},
         ])
         assert result["is_error"] is False
-        assert "inactive" in result["output"]
+        assert "completed" in result["output"].lower()
 
         plan = json.loads((workspace / ".agentd" / "task_plan.json").read_text())
         assert plan["active"] is False

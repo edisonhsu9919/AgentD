@@ -25,6 +25,7 @@ from core.database import get_db
 from core.response import ok, ok_list
 from skills import service as skill_svc
 from skills.filesystem import (
+    SkillImportError,
     get_skills_dir,
     import_package_to_catalog,
     install_skill_for_user,
@@ -380,9 +381,9 @@ async def import_local_skill(
         )
 
     meta = result.meta
-    # Check for duplicate
+    # Check for duplicate — allow re-import over soft-deleted records
     existing = await skill_svc.get_skill_by_name_version(db, meta.name, meta.version)
-    if existing:
+    if existing and existing.is_active:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -391,29 +392,56 @@ async def import_local_skill(
             },
         )
 
-    # Import to filesystem catalog
-    import_package_to_catalog(body.source_path, meta)
+    # Import to filesystem catalog (may build .venv — fail-fast on error)
+    try:
+        import_package_to_catalog(body.source_path, meta)
+    except SkillImportError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "IMPORT_FAILED",
+                "message": f"Skill import failed: {exc}",
+            },
+        )
 
     # Merge icon into metadata_extra for DB persistence
     me = dict(meta.metadata) if meta.metadata else {}
     if meta.icon:
         me["icon"] = meta.icon
 
-    # Create DB record
-    skill = await skill_svc.create_skill(
-        db,
-        name=meta.name,
-        description=meta.description,
-        content=meta.body,
-        tags=meta.tags,
-        created_by=admin.id,
-        version=meta.version,
-        license=meta.license,
-        compatibility=meta.compatibility,
-        metadata_extra=me,
-        source_type="import_local",
-        source_path=body.source_path,
-    )
+    if existing and not existing.is_active:
+        # Reactivate and update the soft-deleted record
+        skill = await skill_svc.update_skill(
+            db,
+            existing.id,
+            name=meta.name,
+            description=meta.description,
+            content=meta.body,
+            tags=meta.tags,
+            version=meta.version,
+            license=meta.license,
+            compatibility=meta.compatibility,
+            metadata_extra=me,
+            is_active=True,
+            source_type="import_local",
+            source_path=body.source_path,
+        )
+    else:
+        # Create new DB record
+        skill = await skill_svc.create_skill(
+            db,
+            name=meta.name,
+            description=meta.description,
+            content=meta.body,
+            tags=meta.tags,
+            created_by=admin.id,
+            version=meta.version,
+            license=meta.license,
+            compatibility=meta.compatibility,
+            metadata_extra=me,
+            source_type="import_local",
+            source_path=body.source_path,
+        )
 
     return ok(SkillDetailResponse.model_validate(skill).model_dump(mode="json"))
 
@@ -422,10 +450,17 @@ async def import_local_skill(
 
 
 def _ensure_catalog_from_db(skill) -> None:
-    """Re-create catalog directory from DB content when FS is out of sync.
+    """Best-effort re-create catalog SKILL.md from DB content.
 
     This handles the case where a skill exists in DB but its catalog directory
     was lost or never created (e.g. created via test fixtures, DB restore, etc).
+
+    **Limitation (Phase M4-B):** This can only restore SKILL.md from DB content.
+    It cannot restore scripts/, requirements.txt, or .venv — those only exist
+    when a skill was imported via ``import-local``. After self-heal, the caller
+    must still rely on ``install_skill_for_user()``'s completeness check.
+    For import-local skills with scripts/.venv, re-importing is the correct
+    repair path, not self-heal.
     """
     meta = SkillPackageMeta(
         name=skill.name,

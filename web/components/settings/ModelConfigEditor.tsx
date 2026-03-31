@@ -28,6 +28,7 @@ export default function ModelConfigEditor({
   onUpdate,
 }: ModelConfigEditorProps) {
   const [name, setName] = useState("");
+  const [modelType, setModelType] = useState<"llm" | "vlm">("llm");
   const [providerType, setProviderType] = useState("openai_compatible");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -35,10 +36,12 @@ export default function ModelConfigEditor({
   const [modelId, setModelId] = useState("");
   const [isEnabled, setIsEnabled] = useState(true);
   const [timeoutSeconds, setTimeoutSeconds] = useState("");
+  const [contextWindow, setContextWindow] = useState("");
 
   useEffect(() => {
     if (config) {
       setName(config.name);
+      setModelType(config.model_type || "llm");
       setProviderType(config.provider_type);
       setBaseUrl(config.base_url);
       setApiKey("");
@@ -46,8 +49,10 @@ export default function ModelConfigEditor({
       setModelId(config.model_id);
       setIsEnabled(config.is_enabled);
       setTimeoutSeconds(config.timeout_seconds?.toString() || "");
+      setContextWindow(config.context_window?.toString() || "");
     } else {
       setName("");
+      setModelType("llm");
       setProviderType("openai_compatible");
       setBaseUrl("");
       setApiKey("");
@@ -55,6 +60,7 @@ export default function ModelConfigEditor({
       setModelId("");
       setIsEnabled(true);
       setTimeoutSeconds("");
+      setContextWindow("");
     }
   }, [config, isCreating]);
 
@@ -62,21 +68,26 @@ export default function ModelConfigEditor({
     e.preventDefault();
 
     const timeout = timeoutSeconds ? parseInt(timeoutSeconds, 10) : null;
+    const ctxWindow = contextWindow ? parseInt(contextWindow, 10) : null;
 
     if (isCreating) {
       const data: ModelConfigCreate = {
         name,
+        model_type: modelType,
         provider_type: providerType,
         base_url: baseUrl,
         model_id: modelId,
         is_enabled: isEnabled,
         timeout_seconds: timeout,
+        context_window: ctxWindow,
       };
       if (apiKey) data.api_key = apiKey;
       onCreate(data);
     } else if (config) {
       const data: ModelConfigUpdate = {};
       if (name !== config.name) data.name = name;
+      if (modelType !== (config.model_type || "llm"))
+        data.model_type = modelType;
       if (providerType !== config.provider_type)
         data.provider_type = providerType;
       if (baseUrl !== config.base_url) data.base_url = baseUrl;
@@ -88,6 +99,8 @@ export default function ModelConfigEditor({
         : null;
       if (newTimeout !== config.timeout_seconds)
         data.timeout_seconds = newTimeout;
+      if (ctxWindow !== config.context_window)
+        data.context_window = ctxWindow;
       onUpdate(config.id, data);
     }
   };
@@ -128,6 +141,41 @@ export default function ModelConfigEditor({
             placeholder="e.g. GPT-4o Production"
             className={inputClass}
           />
+        </div>
+
+        <div>
+          <label className="mb-1 block text-[10px] font-medium text-text-secondary">
+            Model Type *
+          </label>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setModelType("llm")}
+              className={`flex-1 rounded border px-2.5 py-1.5 text-xs font-medium transition ${
+                modelType === "llm"
+                  ? "border-blue-500 bg-blue-500/10 text-blue-400"
+                  : "border-border bg-bg-primary text-text-secondary hover:border-border/80"
+              }`}
+            >
+              LLM
+            </button>
+            <button
+              type="button"
+              onClick={() => setModelType("vlm")}
+              className={`flex-1 rounded border px-2.5 py-1.5 text-xs font-medium transition ${
+                modelType === "vlm"
+                  ? "border-purple-500 bg-purple-500/10 text-purple-400"
+                  : "border-border bg-bg-primary text-text-secondary hover:border-border/80"
+              }`}
+            >
+              VLM
+            </button>
+          </div>
+          <p className="mt-0.5 text-[10px] text-text-secondary/60">
+            {modelType === "vlm"
+              ? "Vision Language Model \u2014 for image understanding"
+              : "Large Language Model \u2014 main session model"}
+          </p>
         </div>
 
         <div>
@@ -208,6 +256,20 @@ export default function ModelConfigEditor({
             min={1}
             max={600}
             placeholder="Optional (1-600)"
+            className={inputClass}
+          />
+        </div>
+
+        <div>
+          <label className="mb-1 block text-[10px] font-medium text-text-secondary">
+            Context Window
+          </label>
+          <input
+            type="number"
+            value={contextWindow}
+            onChange={(e) => setContextWindow(e.target.value)}
+            min={1}
+            placeholder="Optional max context tokens, e.g. 32768"
             className={inputClass}
           />
         </div>

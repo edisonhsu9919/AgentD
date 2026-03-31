@@ -1,14 +1,15 @@
 "use client";
 
-import { CheckCircle, XCircle, AlertTriangle, Database, Cpu } from "lucide-react";
-import type { HealthResponse } from "@/lib/types";
+import { CheckCircle, XCircle, AlertTriangle, Database, Cpu, Eye } from "lucide-react";
+import type { HealthResponse, VLMConfigResponse } from "@/lib/types";
 
 interface RuntimeStatusProps {
   health: HealthResponse | null;
   loading: boolean;
+  vlmConfig?: VLMConfigResponse | null;
 }
 
-export default function RuntimeStatus({ health, loading }: RuntimeStatusProps) {
+export default function RuntimeStatus({ health, loading, vlmConfig }: RuntimeStatusProps) {
   if (loading && !health) {
     return (
       <div className="rounded-lg border border-border bg-bg-secondary p-4">
@@ -42,7 +43,7 @@ export default function RuntimeStatus({ health, loading }: RuntimeStatusProps) {
       </h3>
 
       {/* Key status cards */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {/* Ready */}
         <div
           className={`rounded-lg border p-3 ${
@@ -107,7 +108,7 @@ export default function RuntimeStatus({ health, loading }: RuntimeStatusProps) {
           )}
         </div>
 
-        {/* Runtime Model */}
+        {/* LLM Model */}
         <div
           className={`rounded-lg border p-3 ${
             health.runtime_model_source === "db_default"
@@ -125,7 +126,7 @@ export default function RuntimeStatus({ health, loading }: RuntimeStatusProps) {
               }
             />
             <span className="text-[10px] font-medium text-text-secondary">
-              Model
+              LLM Model
             </span>
           </div>
           <span className="block truncate text-sm font-semibold text-text-primary">
@@ -136,6 +137,48 @@ export default function RuntimeStatus({ health, loading }: RuntimeStatusProps) {
               ? "env fallback"
               : "db default"}
           </p>
+        </div>
+
+        {/* VLM Model */}
+        <div
+          className={`rounded-lg border p-3 ${
+            vlmConfig?.available
+              ? vlmConfig.source === "db_default"
+                ? "border-purple-500/30 bg-purple-500/5"
+                : "border-purple-500/20 bg-purple-500/5"
+              : "border-border bg-bg-primary/50"
+          }`}
+        >
+          <div className="mb-1 flex items-center gap-1.5">
+            <Eye
+              size={13}
+              className={
+                vlmConfig?.available ? "text-purple-400" : "text-text-secondary/40"
+              }
+            />
+            <span className="text-[10px] font-medium text-text-secondary">
+              VLM Model
+            </span>
+          </div>
+          {vlmConfig?.available && vlmConfig.active_config ? (
+            <>
+              <span className="block truncate text-sm font-semibold text-text-primary">
+                {vlmConfig.active_config.name}
+              </span>
+              <p className="mt-0.5 text-[10px] text-text-secondary">
+                {vlmConfig.source === "env_fallback" ? "env fallback" : "db default"}
+              </p>
+            </>
+          ) : (
+            <>
+              <span className="text-sm font-semibold text-text-secondary/40">
+                Not configured
+              </span>
+              <p className="mt-0.5 text-[10px] text-text-secondary/40">
+                No vision model
+              </p>
+            </>
+          )}
         </div>
       </div>
 

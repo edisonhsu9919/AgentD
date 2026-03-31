@@ -33,6 +33,7 @@ class SkillPackageMeta:
     has_references: bool = False
     has_assets: bool = False
     has_scripts: bool = False
+    has_requirements: bool = False
 
 
 @dataclass
@@ -178,6 +179,7 @@ def validate_package(package_dir: str) -> SkillPackageValidationResult:
         has_references=os.path.isdir(os.path.join(package_dir, "references")),
         has_assets=os.path.isdir(os.path.join(package_dir, "assets")),
         has_scripts=os.path.isdir(os.path.join(package_dir, "scripts")),
+        has_requirements=os.path.isfile(os.path.join(package_dir, "requirements.txt")),
     )
 
     return SkillPackageValidationResult(valid=True, meta=meta)

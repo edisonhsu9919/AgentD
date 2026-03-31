@@ -24,6 +24,8 @@ async def lifespan(app: FastAPI):
 
     await _check_schema_version()
     await _log_runtime_model()
+    await _log_runtime_vlm()
+    _log_tool_registry()
     await _seed_admin()
 
     # Start PG LISTEN/NOTIFY bridge for cross-process SSE (Phase C)
@@ -38,7 +40,7 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
 
 
-EXPECTED_SCHEMA_VERSION = "010"
+EXPECTED_SCHEMA_VERSION = "013"
 
 
 async def _check_schema_version() -> None:
@@ -95,6 +97,39 @@ async def _log_runtime_model() -> None:
             )
     except Exception as e:
         print(f"[startup] Could not resolve runtime model: {e}")
+
+
+async def _log_runtime_vlm() -> None:
+    """Log the current VLM configuration at startup."""
+    from core.database import AsyncSessionLocal
+    from model_config.service import resolve_active_vlm_config
+
+    try:
+        async with AsyncSessionLocal() as db:
+            resolved = await resolve_active_vlm_config(db)
+            if resolved:
+                print(
+                    f"[startup] VLM source: {resolved.source} | "
+                    f"name={resolved.name} | model_id={resolved.model_id} | "
+                    f"base_url={resolved.base_url}"
+                )
+            else:
+                print("[startup] VLM: not configured (vision capabilities unavailable)")
+    except Exception as e:
+        print(f"[startup] Could not resolve VLM config: {e}")
+
+
+def _log_tool_registry() -> None:
+    """Log the registered tool names at startup for diagnostics.
+
+    Eagerly initializes the registry singleton so stale-code issues
+    (e.g. deploying a new tool without restarting) are immediately visible.
+    """
+    from tools.registry import get_registry
+
+    registry = get_registry()
+    names = sorted(registry.tools.keys())
+    print(f"[startup] Tool registry: {len(names)} tools — {', '.join(names)}")
 
 
 async def _seed_admin() -> None:
@@ -249,6 +284,11 @@ async def health():
     else:
         status = "degraded"
 
+    # Tool registry count (for stale-process diagnostics)
+    from tools.registry import get_registry
+    tool_registry = get_registry()
+    tools_count = len(tool_registry.tools)
+
     return {
         "status": status,
         "ready": ready,
@@ -259,6 +299,7 @@ async def health():
         "schema_ok": schema_ok,
         "runtime_model_source": runtime_model_source,
         "runtime_model": runtime_model,
+        "tools_count": tools_count,
         "instance_id": _INSTANCE_ID,
         "started_at": _STARTED_AT,
         "pid": os.getpid(),

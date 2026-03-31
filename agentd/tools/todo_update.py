@@ -105,14 +105,8 @@ class TodoUpdateTool(BaseTool):
                 "plan": plan,
             })
 
-        # Build summary
-        counts = {"completed": 0, "in_progress": 0, "pending": 0}
-        for s in steps:
-            counts[s["status"]] = counts.get(s["status"], 0) + 1
-
-        status_str = f"completed={counts['completed']}, in_progress={counts['in_progress']}, pending={counts['pending']}"
-        active_str = "active" if active else "completed (inactive)"
+        from tools.planning import _format_plan_output
         return {
-            "output": f"Task plan updated [{active_str}]: {status_str}",
+            "output": _format_plan_output("updated", plan),
             "is_error": False,
         }
