@@ -319,7 +319,7 @@ class TestFileInspectRegistry:
         from tools.registry import get_registry
 
         registry = get_registry()
-        assert len(registry.tools) == 11
+        assert len(registry.tools) == 16
 
 
 if __name__ == "__main__":

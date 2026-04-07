@@ -65,6 +65,20 @@ class BashTool(BaseTool):
     def description(self) -> str:
         return "Execute a shell command in the user's workspace virtual environment."
 
+    @property
+    def metadata(self) -> "ToolMetadata":
+        from tools.base import ToolMetadata
+        return ToolMetadata(
+            default_permission="ask",
+            is_read_only=False,
+            is_destructive=True,
+            is_concurrency_safe=False,
+            can_run_in_background=True,
+            result_compressibility="high",
+            access_scope="unrestricted",
+            mutates_session_state=False,
+        )
+
     def schema(self) -> dict[str, Any]:
         return {
             "type": "object",

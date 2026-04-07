@@ -1,8 +1,10 @@
 "use client";
 
 import { useMemo } from "react";
-import type { Message } from "@/lib/types";
+import type { Message, KnowledgeSearchResult, SourceRefItem } from "@/lib/types";
 import MessagePart from "./MessagePart";
+import KnowledgeSourceList from "./KnowledgeSourceList";
+import CitedTextBlock from "./CitedTextBlock";
 import { User, Bot, Wrench } from "lucide-react";
 
 const roleConfig = {
@@ -29,9 +31,13 @@ const roleConfig = {
 export default function MessageBubble({
   message,
   toolInfoMap,
+  knowledgeSources,
+  sessionId,
 }: {
   message: Message;
   toolInfoMap?: Map<string, { tool_name: string; input: Record<string, unknown> }>;
+  knowledgeSources?: KnowledgeSearchResult[];
+  sessionId?: string;
 }) {
   const config = roleConfig[message.role] || roleConfig.assistant;
   const Icon = config.icon;
@@ -60,13 +66,73 @@ export default function MessageBubble({
           </span>
         </div>
 
-        {/* Parts */}
+        {/* Parts — with cited text merging */}
         <div className="space-y-1">
-          {message.parts.map((part, i) => (
-            <MessagePart key={i} part={part} toolNameMap={toolNameMap} toolInfoMap={toolInfoMap} />
-          ))}
+          <PartsRenderer
+            parts={message.parts}
+            toolNameMap={toolNameMap}
+            toolInfoMap={toolInfoMap}
+            knowledgeSources={knowledgeSources}
+          />
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Smart parts renderer: detects when a message has both text + source_refs
+ * and merges them into a CitedTextBlock (inline citations + bottom source list).
+ * Falls back to standard per-part rendering otherwise.
+ */
+function PartsRenderer({
+  parts,
+  toolNameMap,
+  toolInfoMap,
+  knowledgeSources,
+}: {
+  parts: Message["parts"];
+  toolNameMap: Map<string, string>;
+  toolInfoMap?: Map<string, { tool_name: string; input: Record<string, unknown> }>;
+  knowledgeSources?: KnowledgeSearchResult[];
+}) {
+  // Check if this message has both text and source_refs parts
+  const sourceRefsPart = parts.find((p) => p.type === "source_refs");
+  const textParts = parts.filter((p) => p.type === "text");
+  const hasCitedContent = sourceRefsPart && textParts.length > 0;
+
+  if (hasCitedContent) {
+    // Merge all text content and render with inline citations
+    const combinedText = textParts
+      .map((p) => (p.type === "text" ? p.content : ""))
+      .join("\n\n");
+    const sources = (sourceRefsPart as import("@/lib/types").SourceRefsPart).sources;
+
+    return (
+      <>
+        {/* Render non-text/non-source_refs parts first (reasoning, tool_call, etc.) */}
+        {parts.map((part, i) => {
+          if (part.type === "text" || part.type === "source_refs") return null;
+          return <MessagePart key={i} part={part} toolNameMap={toolNameMap} toolInfoMap={toolInfoMap} />;
+        })}
+        {/* Then render the cited text block */}
+        <CitedTextBlock text={combinedText} sources={sources} />
+      </>
+    );
+  }
+
+  // Standard rendering — no citation merging
+  return (
+    <>
+      {parts.map((part, i) => (
+        <MessagePart key={i} part={part} toolNameMap={toolNameMap} toolInfoMap={toolInfoMap} />
+      ))}
+      {/* Fallback knowledge sources from tool results */}
+      {knowledgeSources &&
+        knowledgeSources.length > 0 &&
+        !parts.some((p) => p.type === "source_refs") && (
+          <KnowledgeSourceList searchResults={knowledgeSources} />
+        )}
+    </>
   );
 }

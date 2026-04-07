@@ -27,9 +27,11 @@ async def list_square_cards(
     db: AsyncSession,
     user_id: uuid.UUID,
     q: Optional[str] = None,
+    user_root: str = "",
 ) -> list[dict]:
     """Return skill cards aggregated by name with user install state.
 
+    Phase 6: installed truth from filesystem, not user_skills table.
     Each card represents a unique skill name, aggregating all active versions.
     Ordered by total usage DESC, name ASC.
     """
@@ -53,7 +55,11 @@ async def list_square_cards(
     for skill in rows:
         grouped.setdefault(skill.name, []).append(skill)
 
-    # Fetch user install state
+    # Phase 6: filesystem-based installed truth
+    from skills.filesystem import get_installed_skill_names_fs
+    fs_installed = get_installed_skill_names_fs(user_root) if user_root else set()
+
+    # user_skills for metadata enrichment only (usage, enabled)
     user_skills = await _get_user_skills_map(db, user_id)
 
     # Build cards — only include skills with valid catalog directories
@@ -62,11 +68,14 @@ async def list_square_cards(
         # Filter to versions that actually exist on disk
         valid_versions = [v for v in versions if _has_catalog_version(name, v.version)]
         if not valid_versions:
-            continue  # skip phantom skills with no catalog data
+            continue
 
-        latest = valid_versions[0]  # already sorted desc
+        latest = valid_versions[0]
         total_usage = sum(v.usage_count for v in valid_versions)
         us = user_skills.get(name)
+
+        # installed truth from filesystem
+        is_installed = name in fs_installed
 
         cards.append({
             "name": name,
@@ -76,9 +85,9 @@ async def list_square_cards(
             "latest_version": latest.version,
             "available_versions": [v.version for v in valid_versions],
             "usage_count_total": total_usage,
-            "installed": us is not None,
-            "installed_version": us.version if us else None,
-            "enabled": us.is_enabled if us else None,
+            "installed": is_installed,
+            "installed_version": us.version if (us and is_installed) else None,
+            "enabled": us.is_enabled if (us and is_installed) else None,
         })
 
     # Sort by usage DESC, name ASC

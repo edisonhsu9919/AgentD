@@ -44,6 +44,49 @@ def get_skills_dir(user_root: str) -> str:
     return os.path.join(user_root, "skills")
 
 
+def list_installed_skills_fs(user_root: str) -> list[dict]:
+    """List installed skills from the filesystem (single source of truth).
+
+    Phase 6: this is the ONLY authoritative source for "is installed".
+    Scans user_root/skills/*/SKILL.md and returns metadata.
+    """
+    from skills.package import parse_frontmatter
+
+    skills_dir = get_skills_dir(user_root)
+    result = []
+    if not os.path.isdir(skills_dir):
+        return result
+
+    for entry in sorted(os.listdir(skills_dir)):
+        skill_path = os.path.join(skills_dir, entry)
+        if not os.path.isdir(skill_path):
+            continue
+        skill_md = os.path.join(skill_path, "SKILL.md")
+        if not os.path.isfile(skill_md):
+            continue
+        try:
+            with open(skill_md, "r", encoding="utf-8") as f:
+                content = f.read()
+            meta = parse_frontmatter(content)
+            result.append({
+                "name": meta.get("name", entry),
+                "description": meta.get("description", ""),
+                "version": meta.get("version", "0.1.0"),
+                "icon": meta.get("icon", ""),
+                "tags": meta.get("tags", []),
+                "dir_name": entry,
+            })
+        except Exception:
+            continue
+
+    return result
+
+
+def get_installed_skill_names_fs(user_root: str) -> set[str]:
+    """Get just the set of installed skill names from filesystem."""
+    return {s["name"] for s in list_installed_skills_fs(user_root)}
+
+
 # ---------------------------------------------------------------------------
 # Catalog write / remove (versioned)
 # ---------------------------------------------------------------------------

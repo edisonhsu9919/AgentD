@@ -16,7 +16,7 @@ import os
 from typing import Any
 
 from tools.base import BaseTool, ToolContext
-from workspace.manager import is_internal_path, validate_path
+from workspace.manager import is_internal_path, validate_path, validate_path_dual
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,21 @@ class FileInspectTool(BaseTool):
             "proceed with full processing, load a skill, or inform the user about limitations."
         )
 
+    @property
+    def metadata(self) -> "ToolMetadata":
+        from tools.base import ToolMetadata
+        return ToolMetadata(
+            default_permission="allow",
+            is_read_only=True,
+            is_destructive=False,
+            is_concurrency_safe=True,
+            can_run_in_background=True,
+            result_compressibility="medium",
+            access_scope="session_only",
+            mutates_session_state=False,
+            max_result_size_chars=30_000,
+        )
+
     def schema(self) -> dict[str, Any]:
         return {
             "type": "object",
@@ -72,7 +87,7 @@ class FileInspectTool(BaseTool):
             return {"output": "Access denied: path points to internal system directory", "is_error": True}
 
         try:
-            abs_path = validate_path(ctx.session_dir, path)
+            abs_path = validate_path_dual(ctx.session_dir, ctx.parent_session_dir, path)
         except PermissionError as e:
             return {"output": str(e), "is_error": True}
 

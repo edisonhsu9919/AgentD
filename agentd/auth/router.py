@@ -84,35 +84,54 @@ async def me_profile(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return full user profile with installed skills (Phase H1).
+    """Return full user profile with installed skills.
 
-    Skills are ordered by usage_count DESC, name ASC.
-    Icon is resolved from the catalog metadata if available.
+    Phase 6: installed skills truth comes from the filesystem.
+    user_skills table only enriches with usage/enabled metadata.
+    Orphan user_skills records (no local directory) are cleaned up lazily.
     """
     from skills import user_skill_service as us_svc
     from skills import service as skill_svc
+    from skills.filesystem import list_installed_skills_fs
 
+    # Step 1: filesystem truth
+    fs_skills = list_installed_skills_fs(current_user.workspace)
+    fs_names = {s["name"] for s in fs_skills}
+
+    # Step 2: user_skills metadata (usage, enabled, etc.)
     user_skills = await us_svc.list_user_skills(db, current_user.id)
+    us_map = {us.skill_name: us for us in user_skills}
 
-    # Resolve icon from catalog for each skill
+    # Step 3: build response — only include skills that exist on filesystem
     skill_items: list[dict] = []
-    for us in user_skills:
-        icon = ""
-        catalog_skill = await skill_svc.get_skill_by_name_version(
-            db, us.skill_name, us.version,
-        )
-        if catalog_skill:
-            icon = catalog_skill.icon
+    for fs in fs_skills:
+        name = fs["name"]
+        us = us_map.get(name)
+        icon = fs.get("icon", "")
+        if not icon:
+            catalog_skill = await skill_svc.get_skill_by_name_version(
+                db, name, fs.get("version", ""),
+            )
+            if catalog_skill:
+                icon = catalog_skill.icon
+
         skill_items.append(
             UserSkillItem(
-                name=us.skill_name,
-                version=us.version,
-                is_enabled=us.is_enabled,
-                usage_count=us.usage_count,
-                last_used_at=us.last_used_at,
+                name=name,
+                version=fs.get("version", "0.1.0"),
+                is_enabled=us.is_enabled if us else True,
+                usage_count=us.usage_count if us else 0,
+                last_used_at=us.last_used_at if us else None,
                 icon=icon,
             ).model_dump(mode="json")
         )
+
+    # Step 4: lazy orphan cleanup — remove user_skills records for missing skills
+    orphan_names = set(us_map.keys()) - fs_names
+    if orphan_names:
+        for orphan_name in orphan_names:
+            await us_svc.remove_user_skill(db, current_user.id, orphan_name)
+        await db.commit()
 
     profile = UserProfileResponse.model_validate(current_user).model_dump(mode="json")
     profile["installed_skills"] = skill_items

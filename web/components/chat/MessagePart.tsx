@@ -1,11 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import type { Part } from "@/lib/types";
+import type { Part, SubtaskResultPart, SourceRefsPart } from "@/lib/types";
 import ToolCallBlock from "./ToolCallBlock";
+import KnowledgeSourceList from "./KnowledgeSourceList";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, GitBranch, ExternalLink } from "lucide-react";
 
 /**
  * Strip <think>...</think> blocks from LLM output.
@@ -79,9 +80,52 @@ export default function MessagePart({ part, toolNameMap, toolInfoMap }: MessageP
         </div>
       );
 
+    case "subtask_result":
+      return <SubtaskResultCard part={part} />;
+
+    case "source_refs":
+      return <KnowledgeSourceList sourceRefs={part.sources} />;
+
     default:
       return null;
   }
+}
+
+/** Sub-task result card — rendered for subtask_result parts */
+function SubtaskResultCard({ part }: { part: SubtaskResultPart }) {
+  const isFailed = part.status === "failed";
+
+  return (
+    <div className={`my-2 rounded-lg border p-3 space-y-2 ${
+      isFailed
+        ? "border-danger/20 bg-danger/5"
+        : "border-purple-500/20 bg-purple-500/5"
+    }`}>
+      <div className="flex items-center gap-2">
+        <GitBranch size={14} className={isFailed ? "text-danger" : "text-purple-400"} />
+        <span className={`text-xs font-medium ${isFailed ? "text-danger" : "text-purple-400"}`}>
+          {isFailed ? "Sub-task Failed" : "Sub-task Completed"}
+        </span>
+        {part.title && (
+          <span className="text-xs text-text-primary">&mdash; {part.title}</span>
+        )}
+      </div>
+
+      {part.summary && (
+        <p className="text-xs text-text-primary whitespace-pre-wrap">{part.summary}</p>
+      )}
+
+      {part.child_session_id && (
+        <a
+          href={`/chat?s=${part.child_session_id}`}
+          className="inline-flex items-center gap-1 text-[10px] text-accent transition hover:underline"
+        >
+          <ExternalLink size={10} />
+          View child session
+        </a>
+      )}
+    </div>
+  );
 }
 
 /** Collapsible reasoning block for persisted messages */

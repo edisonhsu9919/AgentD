@@ -1,9 +1,10 @@
 "use client";
 
 import { useSessionStore } from "@/store/session";
+import { useChatStore } from "@/store/chat";
 import { stripThinkTags } from "@/lib/constants";
 import { showToast } from "@/components/ui/Toast";
-import { Plus, Loader2, Trash2, MessageSquare } from "lucide-react";
+import { Plus, Loader2, Trash2, MessageSquare, Cpu } from "lucide-react";
 import type { Session, SessionStatus } from "@/lib/types";
 
 const statusColors: Record<SessionStatus, string> = {
@@ -11,17 +12,20 @@ const statusColors: Record<SessionStatus, string> = {
   queued: "bg-yellow-400",
   running: "bg-accent",
   waiting: "bg-yellow-500",
+  subtask_waiting: "bg-purple-400",
   error: "bg-danger",
 };
 
 function SessionItem({
   session,
   isActive,
+  hasDetachedTasks,
   onSelect,
   onDelete,
 }: {
   session: Session;
   isActive: boolean;
+  hasDetachedTasks: boolean;
   onSelect: () => void;
   onDelete: () => void;
 }) {
@@ -36,6 +40,14 @@ function SessionItem({
     >
       <MessageSquare size={14} className="shrink-0" />
       <span className="min-w-0 flex-1 truncate text-sm">{stripThinkTags(session.title)}</span>
+      {hasDetachedTasks && (
+        <span
+          className="flex shrink-0 items-center gap-0.5 rounded bg-purple-500/10 px-1 py-0.5 text-[9px] font-medium text-purple-400"
+          title="Background tasks running"
+        >
+          <Cpu size={9} />
+        </span>
+      )}
       <span
         className={`h-2 w-2 shrink-0 rounded-full ${statusColors[session.status]}`}
         title={session.status}
@@ -57,6 +69,7 @@ function SessionItem({
 export default function SessionList() {
   const { sessions, currentSessionId, isCreating, selectSession, createAndSelectSession, deleteSession } =
     useSessionStore();
+  const runtime = useChatStore((s) => s.runtime);
 
   return (
     <div className="flex flex-col gap-1">
@@ -75,6 +88,10 @@ export default function SessionList() {
             key={s.id}
             session={s}
             isActive={s.id === currentSessionId}
+            hasDetachedTasks={
+              s.id === currentSessionId &&
+              !!runtime?.has_running_detached_tasks
+            }
             onSelect={() => selectSession(s.id)}
             onDelete={() => deleteSession(s.id).catch((e: Error) => showToast("error", e.message))}
           />

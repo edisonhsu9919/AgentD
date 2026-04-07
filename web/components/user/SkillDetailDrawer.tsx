@@ -33,6 +33,8 @@ interface SkillDetailDrawerProps {
   actionLoading?: boolean;
   /** Square mode: action error message */
   actionError?: string | null;
+  /** Admin mode: global delete callback (deletes skill from entire system) */
+  onDeleteGlobal?: (skillId: string) => Promise<void>;
 }
 
 function TreeNodeItem({ node, depth = 0 }: { node: SquareTreeNode; depth?: number }) {
@@ -68,6 +70,7 @@ export default function SkillDetailDrawer({
   onUninstall,
   actionLoading,
   actionError,
+  onDeleteGlobal,
 }: SkillDetailDrawerProps) {
   const isSquareMode = !!(onInstall || onUninstall);
 
@@ -272,6 +275,23 @@ export default function SkillDetailDrawer({
                   <XCircle size={12} className="shrink-0" />
                   <span>{actionError}</span>
                 </div>
+              )}
+
+              {/* Admin: global delete */}
+              {onDeleteGlobal && (
+                <button
+                  onClick={() => {
+                    const ok = window.confirm(
+                      `Delete "${detail.name}" from system?\n\nThis will:\n- Remove the skill from the system catalog\n- Uninstall it from ALL users\n- This action cannot be undone`,
+                    );
+                    if (ok) onDeleteGlobal(detail.selected_skill_id);
+                  }}
+                  disabled={actionLoading}
+                  className="flex w-full items-center justify-center gap-1.5 rounded border border-danger/30 px-3 py-1.5 text-xs font-medium text-danger transition hover:bg-danger/10 disabled:opacity-50"
+                >
+                  <Trash2 size={13} />
+                  Delete from System
+                </button>
               )}
             </div>
           )}

@@ -40,15 +40,24 @@ async def list_sessions(
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[list[Session], int]:
-    """Return (sessions, total) for a user, ordered by updated_at desc."""
-    # Count
-    count_q = select(func.count()).select_from(Session).where(Session.user_id == user_id)
+    """Return (sessions, total) for a user, ordered by updated_at desc.
+
+    Child sessions (parent_id != NULL) are excluded from the list —
+    they are internal implementation details of launch_subagent and
+    should not appear in the sidebar.
+    """
+    # Count — exclude child sessions
+    count_q = (
+        select(func.count())
+        .select_from(Session)
+        .where(Session.user_id == user_id, Session.parent_id.is_(None))
+    )
     total = (await db.execute(count_q)).scalar_one()
 
-    # Fetch
+    # Fetch — exclude child sessions
     q = (
         select(Session)
-        .where(Session.user_id == user_id)
+        .where(Session.user_id == user_id, Session.parent_id.is_(None))
         .order_by(Session.updated_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)

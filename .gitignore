@@ -63,3 +63,12 @@ API_GUIDE.md
 
 # Local skill development
 skills/
+
+# Design reference (local only)
+AgentD-Design-Reference/
+
+# Local database files
+*.db
+
+# Research notes (local only)
+research/

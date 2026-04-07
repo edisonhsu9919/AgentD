@@ -27,6 +27,20 @@ class TodoUpdateTool(BaseTool):
             "or set the plan as inactive when done."
         )
 
+    @property
+    def metadata(self) -> "ToolMetadata":
+        from tools.base import ToolMetadata
+        return ToolMetadata(
+            default_permission="allow",
+            is_read_only=False,
+            is_destructive=False,
+            is_concurrency_safe=False,
+            can_run_in_background=False,
+            result_compressibility="low",
+            access_scope="none",
+            mutates_session_state=True,
+        )
+
     def schema(self) -> dict[str, Any]:
         return {
             "type": "object",

@@ -16,6 +16,8 @@ User install/uninstall:
 
 import uuid
 
+import os
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -113,7 +115,7 @@ async def square_list(
     """
     from skills import square_service as sq_svc
 
-    cards = await sq_svc.list_square_cards(db, current_user.id, q=q)
+    cards = await sq_svc.list_square_cards(db, current_user.id, q=q, user_root=current_user.workspace)
     return ok_list(cards, total=len(cards))
 
 
@@ -344,16 +346,59 @@ async def delete_skill(
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Soft-delete a skill (admin only). Removes from catalog dir."""
+    """Global delete a skill (admin only).
+
+    Phase 6: full global deletion — removes from:
+    1. DB skills table (is_active=false)
+    2. Catalog directory
+    3. ALL users' installed skill directories
+    4. ALL user_skills relationship records
+
+    This prevents orphan skill states.
+    """
+    import shutil
+    from sqlalchemy import delete as sa_delete, select as sa_select
+    from auth.models import User as UserModel
+    from skills.models import UserSkill
+
     skill = await skill_svc.get_skill(db, skill_id)
     if not skill:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "NOT_FOUND", "message": "Skill not found"},
         )
+
+    skill_name = skill.name
+
+    # 1. Soft-delete in DB
     await skill_svc.delete_skill(db, skill_id)
-    remove_skill_from_catalog(skill.name, skill.version)
-    return ok({"deleted": True})
+
+    # 2. Remove from catalog
+    remove_skill_from_catalog(skill_name, skill.version)
+
+    # 3. Remove from ALL users' installed directories
+    users = (await db.execute(sa_select(UserModel))).scalars().all()
+    removed_installs = 0
+    for user in users:
+        skill_dir = os.path.join(user.workspace, "skills", skill_name)
+        if os.path.isdir(skill_dir):
+            shutil.rmtree(skill_dir)
+            removed_installs += 1
+
+    # 4. Remove ALL user_skills records for this skill name
+    result = await db.execute(
+        sa_delete(UserSkill).where(UserSkill.skill_name == skill_name)
+    )
+    removed_links = result.rowcount
+
+    await db.commit()
+
+    return ok({
+        "deleted": True,
+        "skill_name": skill_name,
+        "removed_user_installs_count": removed_installs,
+        "removed_user_links_count": removed_links,
+    })
 
 
 # ── Import local skill package ─────────────────────────────────────────────

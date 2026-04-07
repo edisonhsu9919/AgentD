@@ -188,17 +188,34 @@ def _has_compaction_occurred(session_dir: str) -> bool:
 
 
 def _load_compaction_context_layer(session_dir: str) -> str:
-    """Layer 5: Compaction Context — inject structured summary after compaction.
+    """Layer 5: Compaction Context — inject context recovery after compaction.
 
-    When session_dir/.agentd/context_summary.json exists and is structured,
-    injects key fields so the model can recover session context after compaction.
+    Phase P4-D: Two-mode loading strategy:
+    - post_hard_compact + session_memory.md available → load session_memory.md
+    - Otherwise → fallback to context_summary.json (N1/N2 legacy path)
+
     This layer is only active after at least one compaction has occurred.
-
-    Phase N2: enriched with key_decisions, conversation_highlights, and
-    active skill metadata cross-reference for stronger post-compaction continuity.
     """
     import json as _json
 
+    # Phase P4-D: in post_hard_compact mode, the session_memory.md content
+    # has already been fixed into an is_summary=true DB message during hard
+    # compact. The checkpoint contains this summary message and LangGraph
+    # loads it automatically. Layer 5 should NOT re-inject the disk memory.
+    # So in post_hard_compact, this layer returns empty — the summary is
+    # already in the message history, not in the system prompt.
+    memory_meta_path = Path(session_dir) / ".agentd" / "session_memory_meta.json"
+    if memory_meta_path.exists():
+        try:
+            meta = _json.loads(memory_meta_path.read_text(encoding="utf-8"))
+            if meta.get("post_hard_compact"):
+                # Summary is in DB/checkpoint as is_summary=true message.
+                # No system prompt injection needed.
+                return ""
+        except (ValueError, OSError):
+            pass
+
+    # Legacy path: context_summary.json (N1/N2) — only for pre_hard_compact
     summary_path = Path(session_dir) / ".agentd" / "context_summary.json"
     if not summary_path.exists():
         return ""
@@ -223,7 +240,6 @@ def _load_compaction_context_layer(session_dir: str) -> str:
     if task_state:
         parts.append(f"**Current Task State:** {task_state}")
 
-    # Phase N2: key decisions with reasoning context
     decisions = data.get("key_decisions", [])
     if decisions:
         parts.append("**Key Decisions:**")
@@ -237,10 +253,9 @@ def _load_compaction_context_layer(session_dir: str) -> str:
     artifacts = data.get("important_artifacts", [])
     if artifacts:
         parts.append("**Important Artifacts:**")
-        for a in artifacts[:10]:  # Cap to avoid prompt bloat
+        for a in artifacts[:10]:
             parts.append(f"- {a}")
 
-    # Phase N2: conversation highlights for richer context recovery
     highlights = data.get("conversation_highlights", [])
     if highlights:
         parts.append("**Conversation Highlights:**")
@@ -268,44 +283,45 @@ def build_system_prompt(
     session_id: str = "",
     loaded_skills: list[dict] | None = None,
 ) -> tuple[str, dict]:
-    """Build the system prompt via layered assembly (§8.3).
+    """Build the system prompt via layered assembly.
 
-    Assembly order (Phase L prompt strategy + Phase N1 compaction context):
-    1. Runtime Header (dynamic environment metadata)
-    2. Role Prompt (agent persona from roles/{agent_id}.md)
-    3. Rules Layer (platform constraints from rules/*.md)
-    4. Skills Metadata Layer (frontmatter only — name/version/description)
-    5. Compaction Context (structured summary from context_summary.json)
-
-    Task Plan is NO LONGER injected here (Phase L prompt strategy).
-    Plan state lives in the conversation flow via planning/todo_update ToolMessages.
+    Phase 5 assembly order (identity-first, runtime-after):
+    1. Role Prompt — agent persona (who you are, how you work)
+    2. Rules Layer — platform constraints and boundaries
+    3. Runtime Header — dynamic environment metadata
+    4. Skills Metadata — user's installed skill catalog
+    5. Task Plan — compact-after fallback only
+    6. Compaction Context — post-compaction structured context (legacy)
 
     Returns (prompt_string, diagnostics_dict).
     """
     layers: list[str] = []
     layer_sizes: dict[str, int] = {}
 
-    # Layer 1: Runtime Header
-    header = _load_runtime_header(agent_id, session_dir, user_root, model_id, session_id)
-    layers.append(header)
-    layer_sizes["header"] = len(header)
-
-    # Layer 2: Role Prompt
+    # Layer 1: Role Prompt (identity — "who you are")
     role = _load_role_prompt(agent_id)
     if role:
         layers.append(role)
     layer_sizes["role"] = len(role) if role else 0
 
-    # Layer 3: Rules
+    # Layer 2: Rules (boundaries — "what you must follow")
     rules = _load_rules_layer()
     if rules:
         layers.append(rules)
     layer_sizes["rules"] = len(rules) if rules else 0
 
-    # Task Plan: conditionally injected as compact-after fallback (Phase N2-1).
-    # Normally, plan state lives in checkpoint messages via planning/todo_update tools.
-    # After compaction, those ToolMessages may be summarized away, so we fall back to
-    # the persisted task_plan.json file to ensure plan continuity.
+    # Layer 3: Runtime Header (dynamic environment)
+    header = _load_runtime_header(agent_id, session_dir, user_root, model_id, session_id)
+    layers.append(header)
+    layer_sizes["header"] = len(header)
+
+    # Layer 4: Skills Metadata (user's installed skills — quasi-static)
+    skills = _load_skills_metadata_layer(loaded_skills)
+    if skills:
+        layers.append(skills)
+    layer_sizes["skills"] = len(skills) if skills else 0
+
+    # Layer 5: Task Plan (compact-after fallback — Phase N2-1)
     task_plan = ""
     if _has_compaction_occurred(session_dir):
         task_plan = _load_task_plan_layer(session_dir)
@@ -313,13 +329,7 @@ def build_system_prompt(
             layers.append(task_plan)
     layer_sizes["task_plan"] = len(task_plan) if task_plan else 0
 
-    # Layer 4: Skills Metadata (frontmatter only — OpenCode style)
-    skills = _load_skills_metadata_layer(loaded_skills)
-    if skills:
-        layers.append(skills)
-    layer_sizes["skills"] = len(skills) if skills else 0
-
-    # Layer 5: Compaction Context (Phase N1 — post-compaction structured context)
+    # Layer 6: Compaction Context (legacy — pre_hard_compact only)
     compaction_ctx = _load_compaction_context_layer(session_dir)
     if compaction_ctx:
         layers.append(compaction_ctx)
@@ -330,15 +340,13 @@ def build_system_prompt(
     if settings.debug:
         _debug_prompt_layers(agent_id, layers)
 
-    # Phase L §12.4/12.6: prompt assembly trace — ordered list capturing
-    # exact layer sequence, sizes, and injection status for each run.
-    # Enables post-hoc analysis: info loss vs ordering instability.
+    # Prompt assembly trace — ordered list reflecting Phase 5 sequence
     prompt_assembly_order = [
-        {"name": "header", "chars": layer_sizes["header"], "injected": True},
         {"name": "role", "chars": layer_sizes["role"], "injected": layer_sizes["role"] > 0},
         {"name": "rules", "chars": layer_sizes["rules"], "injected": layer_sizes["rules"] > 0},
-        {"name": "task_plan", "chars": layer_sizes["task_plan"], "injected": layer_sizes["task_plan"] > 0},
+        {"name": "header", "chars": layer_sizes["header"], "injected": True},
         {"name": "skills", "chars": layer_sizes["skills"], "injected": bool(skills)},
+        {"name": "task_plan", "chars": layer_sizes["task_plan"], "injected": layer_sizes["task_plan"] > 0},
         {"name": "compaction_context", "chars": layer_sizes["compaction_context"], "injected": bool(compaction_ctx)},
     ]
 
@@ -359,7 +367,7 @@ def build_system_prompt(
 def _debug_prompt_layers(agent_id: str, layers: list[str]) -> None:
     """Print prompt layer summary when DEBUG=true."""
     total = sum(len(l) for l in layers)
-    names = ["Runtime Header", "Role Prompt", "Rules", "Skills Metadata", "Compaction Context"]
+    names = ["Role Prompt", "Rules", "Runtime Header", "Skills Metadata", "Task Plan (fallback)", "Compaction Context"]
     print(f"[prompt] agent={agent_id} layers={len(layers)} chars={total}")
     for i, layer in enumerate(layers):
         label = names[i] if i < len(names) else f"Layer {i}"
@@ -472,6 +480,8 @@ async def build_agent(
     session_dir: str,
     agent_id: str,
     model_id: str,
+    tool_profile: str | None = None,
+    parent_session_dir: str | None = None,
 ):
     """Create a compiled agent for a specific session.
 
@@ -488,12 +498,19 @@ async def build_agent(
     async with AsyncSessionLocal() as db:
         resolved = await resolve_active_model_config(db)
 
+    # Phase P3: respect model capability profile — disable streaming
+    # when the model (or its inference server) doesn't reliably support it.
+    # Local models with tool-use streaming issues should set
+    # capabilities.streaming=false in model_configs.
+    caps = resolved.capabilities or {}
+    use_streaming = caps.get("streaming", True)
+
     llm = ChatOpenAI(
         model=model_id,
         base_url=resolved.base_url,
         api_key=resolved.api_key,
-        streaming=True,
-        stream_usage=True,
+        streaming=use_streaming,
+        stream_usage=use_streaming,
         http_async_client=httpx.AsyncClient(trust_env=False),
     )
 
@@ -506,12 +523,15 @@ async def build_agent(
         session_dir=session_dir,
         venv_bin=user_root.rstrip("/") + "/.venv/bin/",
         publish=None,  # SSE events are handled by runner, not tools
+        parent_session_dir=parent_session_dir,
     )
-    tools: list[StructuredTool] = registry.get_langchain_tools(ctx)
+    tools: list[StructuredTool] = registry.get_langchain_tools(
+        ctx, tool_profile=tool_profile,
+    )
 
     if settings.debug:
         tool_names = [t.name for t in tools]
-        print(f"[build_agent] session={session_id[:8]} tools={len(tools)}: {tool_names}")
+        print(f"[build_agent] session={session_id[:8]} profile={tool_profile} tools={len(tools)}: {tool_names}")
 
     # 3. System prompt (layered assembly)
     # Phase M1: scan user's installed skills on disk for stable prompt metadata.

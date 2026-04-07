@@ -55,7 +55,7 @@ export interface RefreshResponse {
 
 // --- Session ---
 
-export type SessionStatus = "idle" | "queued" | "running" | "waiting" | "error";
+export type SessionStatus = "idle" | "queued" | "running" | "waiting" | "error" | "subtask_waiting";
 
 export interface TokenUsage {
   input: number;
@@ -116,7 +116,31 @@ export interface ReasoningPart {
   content: string;
 }
 
-export type Part = TextPart | ToolCallPart | ToolResultPart | CompactionPart | ErrorPart | ReasoningPart;
+export interface SubtaskResultPart {
+  type: "subtask_result";
+  task_id: string;
+  child_session_id: string;
+  status: string;
+  summary: string;
+  artifact_root: string;
+  result_ref: string;
+  title: string;
+}
+
+export interface SourceRefItem {
+  doc_id: string;
+  title: string;
+  kind: string;
+  source_file: string;
+  evidence_excerpt: string;
+}
+
+export interface SourceRefsPart {
+  type: "source_refs";
+  sources: SourceRefItem[];
+}
+
+export type Part = TextPart | ToolCallPart | ToolResultPart | CompactionPart | ErrorPart | ReasoningPart | SubtaskResultPart | SourceRefsPart;
 
 export interface Message {
   id: string;
@@ -238,7 +262,12 @@ export type SSEEvent =
   | SSEDone
   | SSEError
   | SSEContextWarning
-  | SSECompactionDone;
+  | SSECompactionDone
+  | SSEPanelUpdate
+  | SSEPanelSubmit
+  | SSETaskStarted
+  | SSETaskCompleted
+  | SSETaskFailed;
 
 // --- Workspace ---
 
@@ -281,6 +310,8 @@ export interface Runtime {
   context_usage_ratio: number | null;
   last_compaction_at: string | null;
   compaction_count: number;
+  has_running_detached_tasks: boolean;
+  running_detached_tasks_count: number;
 }
 
 // --- Policy ---
@@ -610,4 +641,239 @@ export interface StreamingToolCall {
   status: "running" | "completed" | "error";
   output?: string;
   is_error?: boolean;
+}
+
+// --- Task Instance (Phase P3) ---
+
+export type TaskKind = "process" | "child_session";
+export type TaskBlockingMode = "detached" | "blocking";
+export type TaskStatus = "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled";
+
+export interface TaskInstance {
+  task_id: string;
+  session_id: string;
+  task_kind: TaskKind;
+  blocking_mode: TaskBlockingMode;
+  status: TaskStatus;
+  title: string;
+  command: string;
+  spawned_by_tool: string;
+  tool_call_id: string;
+  child_session_id: string | null;
+  pid: number | null;
+  artifact_root: string;
+  stdout_path: string;
+  stderr_path: string;
+  error?: string | null;
+  result_summary?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SSETaskStarted {
+  event: "task_started";
+  session_id: string;
+  task_id: string;
+  status: string;
+  task_kind: TaskKind;
+  child_session_id?: string;
+  timestamp: string;
+}
+
+export interface SSETaskCompleted {
+  event: "task_completed";
+  session_id: string;
+  task_id: string;
+  status: "completed";
+  returncode: number;
+  timestamp: string;
+}
+
+export interface SSETaskFailed {
+  event: "task_failed";
+  session_id: string;
+  task_id: string;
+  status: "failed";
+  returncode: number;
+  timestamp: string;
+}
+
+// --- Knowledge Hub (Phase P6F) ---
+
+export interface KnowledgeDocItem {
+  doc_id: string;
+  title: string;
+  description: string;
+  tags: string[];
+  kind: string;
+  permission: string;
+  owner: string;
+  source_file: string;
+  created_at: string;
+}
+
+// --- Knowledge Sources (Phase P6) ---
+
+export interface KnowledgeSourceRef {
+  doc_id: string;
+  title: string;
+  kind: string;
+  source_file: string;
+  raw_available: boolean;
+  knowledge_md_path: string;
+  raw_path: string | null;
+  evidence_excerpt?: string;
+  page_hint?: string;
+}
+
+export interface KnowledgeSearchResult {
+  doc_id: string;
+  title: string;
+  kind: string;
+  match_count: number;
+  excerpts: Array<{ line: number; text: string }>;
+}
+
+// --- Knowledge Import (Phase P6E) ---
+
+export interface KnowledgeImportDraft {
+  title: string;
+  description: string;
+  tags: string[];
+  kind: string;
+  filename: string;
+  file_size: number;
+  limits: { description_max_chars: number };
+}
+
+export interface KnowledgeImportProgress {
+  task_id: string;
+  status: "extracting" | "committing" | "completed" | "failed";
+  phase: string;
+  filename: string;
+  kind: string;
+  title: string;
+  source_path: string;
+  raw_path: string;
+  content_chars: number;
+  doc_id: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// --- Panel System (Phase P1) ---
+
+export type PanelType = "file_preview" | "task_output" | "html_app";
+
+export interface StructuredContent {
+  widget: "table" | "markdown" | "image" | "json";
+  data: Record<string, unknown>;
+}
+
+export interface HtmlSandboxContent {
+  html: string;
+  height: number;
+  permissions: string[];
+  interaction_id: string;
+  callback_task_id: string;
+}
+
+export interface PanelSubmitPayload {
+  interaction_id: string;
+  callback_task_id: string;
+  data: Record<string, unknown>;
+}
+
+export interface SSEPanelSubmit {
+  event: "panel_submit";
+  session_id: string;
+  interaction_id: string;
+  callback_task_id: string;
+  data: Record<string, unknown>;
+  timestamp: string;
+}
+
+export interface PanelContent {
+  version: string;
+  type: "structured" | "html_sandbox";
+  title: string;
+  subtitle?: string | null;
+  structured?: StructuredContent | null;
+  html_sandbox?: HtmlSandboxContent | null;
+}
+
+export interface SSEPanelUpdate {
+  event: "panel_update";
+  session_id: string;
+  panel_type: PanelType;
+  panel_content: PanelContent;
+  timestamp: string;
+}
+
+export interface InspectResult {
+  path: string;
+  kind: string;
+  inspectable: boolean;
+  // Common
+  size_bytes?: number;
+  mime_type?: string;
+  preview_mode?: string;
+  // PDF
+  pdf_kind?: string;
+  page_count?: number;
+  extractable_text_ratio?: number;
+  metadata?: Record<string, string | null>;
+  text_sample?: string;
+  // Office common
+  office_kind?: string;
+  // DOCX
+  paragraph_count?: number;
+  heading_count?: number;
+  headings?: string[];
+  table_count?: number;
+  // XLSX
+  sheet_count?: number;
+  sheet_names?: string[];
+  sheets?: Array<{
+    name: string;
+    dimensions: string;
+    max_row: number;
+    max_column: number;
+    header_row: string[];
+    sample_rows: string[][];
+  }>;
+  // PPTX
+  slide_count?: number;
+  slides?: Array<{
+    number: number;
+    title: string;
+    text_preview: string;
+    has_notes: boolean;
+  }>;
+  // EML
+  email_kind?: string;
+  subject?: string;
+  from_addr?: string;
+  to_addr?: string;
+  date?: string;
+  body_preview?: string;
+  attachment_count?: number;
+  attachments?: Array<{
+    filename: string;
+    content_type: string;
+  }>;
+  // Image
+  image_format?: string;
+  width?: number;
+  height?: number;
+}
+
+// Panel tab state (frontend-only)
+export interface PanelTab {
+  id: string;
+  type: PanelType;
+  title: string;
+  subtitle?: string;
+  attention?: boolean;
 }

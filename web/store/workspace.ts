@@ -17,6 +17,7 @@ interface WorkspaceState {
     targetDir?: string,
   ) => Promise<void>;
   downloadFile: (sessionId: string, path: string) => Promise<void>;
+  deleteFile: (sessionId: string, path: string) => Promise<void>;
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set) => ({
@@ -85,5 +86,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  },
+
+  deleteFile: async (sessionId: string, path: string) => {
+    await apiFetch(`/sessions/${sessionId}/workspace/item?path=${encodeURIComponent(path)}`, {
+      method: "DELETE",
+    });
   },
 }));

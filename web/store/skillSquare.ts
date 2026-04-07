@@ -1,6 +1,10 @@
 import { create } from "zustand";
 import { apiFetch, ApiRequestError } from "@/lib/api";
 import type { SquareCardItem, SquareDetailResponse } from "@/lib/types";
+import { useUserProfileStore } from "./userProfile";
+
+/** Refresh sidebar skill picker after install/uninstall/delete/import */
+const refreshProfile = () => useUserProfileStore.getState().fetchProfile();
 
 interface SkillSquareState {
   // List
@@ -26,6 +30,8 @@ interface SkillSquareState {
   clearActionError: () => void;
   installSkill: (skillId: string) => Promise<void>;
   uninstallSkill: (skillId: string) => Promise<void>;
+  deleteSkillGlobal: (skillId: string) => Promise<void>;
+  importSkill: (path: string) => Promise<void>;
 }
 
 export const useSkillSquareStore = create<SkillSquareState>((set, get) => ({
@@ -109,9 +115,10 @@ export const useSkillSquareStore = create<SkillSquareState>((set, get) => ({
     set({ actionLoading: true, actionError: null });
     try {
       await apiFetch(`/skills/${skillId}/install`, { method: "POST" });
-      // Refresh both list and detail
+      // Refresh list, detail, and sidebar skill picker
       const { selectedSkill, fetchCards } = get();
       await fetchCards();
+      refreshProfile();
       if (selectedSkill) {
         const detail = await apiFetch<SquareDetailResponse>(
           `/skills/square/${encodeURIComponent(selectedSkill)}`,
@@ -133,9 +140,10 @@ export const useSkillSquareStore = create<SkillSquareState>((set, get) => ({
     set({ actionLoading: true, actionError: null });
     try {
       await apiFetch(`/skills/${skillId}/uninstall`, { method: "DELETE" });
-      // Refresh both list and detail
+      // Refresh list, detail, and sidebar skill picker
       const { selectedSkill, fetchCards } = get();
       await fetchCards();
+      refreshProfile();
       if (selectedSkill) {
         const detail = await apiFetch<SquareDetailResponse>(
           `/skills/square/${encodeURIComponent(selectedSkill)}`,
@@ -149,6 +157,37 @@ export const useSkillSquareStore = create<SkillSquareState>((set, get) => ({
         err instanceof ApiRequestError
           ? err.message
           : "Uninstall failed";
+      set({ actionLoading: false, actionError: message });
+    }
+  },
+
+  deleteSkillGlobal: async (skillId: string) => {
+    set({ actionLoading: true, actionError: null });
+    try {
+      await apiFetch(`/skills/${skillId}`, { method: "DELETE" });
+      set({ actionLoading: false, selectedSkill: null, detail: null });
+      await get().fetchCards();
+      refreshProfile();
+    } catch (err) {
+      const message =
+        err instanceof ApiRequestError ? err.message : "Delete failed";
+      set({ actionLoading: false, actionError: message });
+    }
+  },
+
+  importSkill: async (path: string) => {
+    set({ actionLoading: true, actionError: null });
+    try {
+      await apiFetch("/skills/import-local", {
+        method: "POST",
+        body: JSON.stringify({ path }),
+      });
+      set({ actionLoading: false });
+      await get().fetchCards();
+      refreshProfile();
+    } catch (err) {
+      const message =
+        err instanceof ApiRequestError ? err.message : "Import failed";
       set({ actionLoading: false, actionError: message });
     }
   },

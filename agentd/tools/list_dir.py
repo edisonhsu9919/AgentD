@@ -8,7 +8,7 @@ import os
 from typing import Any, Optional
 
 from tools.base import BaseTool, ToolContext
-from workspace.manager import validate_path
+from workspace.manager import validate_path, validate_path_dual
 
 
 class ListDirTool(BaseTool):
@@ -22,6 +22,20 @@ class ListDirTool(BaseTool):
             "List files and directories in the workspace. "
             "Returns a structured tree view. "
             "Use this instead of 'bash ls' for cleaner, safer output."
+        )
+
+    @property
+    def metadata(self) -> "ToolMetadata":
+        from tools.base import ToolMetadata
+        return ToolMetadata(
+            default_permission="allow",
+            is_read_only=True,
+            is_destructive=False,
+            is_concurrency_safe=True,
+            can_run_in_background=True,
+            result_compressibility="high",
+            access_scope="session_only",
+            mutates_session_state=False,
         )
 
     def schema(self) -> dict[str, Any]:
@@ -45,7 +59,7 @@ class ListDirTool(BaseTool):
         max_depth: int = kwargs.get("max_depth") or 3
 
         try:
-            abs_path = validate_path(ctx.session_dir, path)
+            abs_path = validate_path_dual(ctx.session_dir, ctx.parent_session_dir, path)
         except PermissionError as e:
             return {"output": str(e), "is_error": True}
 

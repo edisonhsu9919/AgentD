@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useChatStore } from "@/store/chat";
+import { useSessionStore } from "@/store/session";
 import MessageBubble from "./MessageBubble";
 import SummaryDivider from "./SummaryDivider";
 import ToolCallBlock from "./ToolCallBlock";
@@ -134,6 +135,7 @@ function ThinkingBlock({
 }
 
 export default function MessageList() {
+  const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const messages = useChatStore((s) => s.messages);
   const streamingDraft = useChatStore((s) => s.streamingDraft);
   const streamingThinking = useChatStore((s) => s.streamingThinking);
@@ -160,6 +162,43 @@ export default function MessageList() {
     }
     return map;
   }, [messages]);
+
+  // Build knowledge sources map: for each assistant message that follows
+  // knowledge tool calls, collect the search results as structured sources.
+  // Key = message id, Value = array of KnowledgeSearchResult.
+  const knowledgeSourcesMap = useMemo(() => {
+    const map = new Map<string, import("@/lib/types").KnowledgeSearchResult[]>();
+    let pendingSources: import("@/lib/types").KnowledgeSearchResult[] = [];
+
+    for (const msg of messages) {
+      if (msg.role === "tool") {
+        // Extract knowledge sources from tool_result parts
+        for (const part of msg.parts) {
+          if (part.type !== "tool_result") continue;
+          const info = toolInfoMap.get(part.tool_call_id);
+          if (!info || !info.tool_name.startsWith("knowledge_")) continue;
+          if (info.tool_name !== "knowledge_search" || part.is_error) continue;
+          try {
+            const parsed = JSON.parse(part.output);
+            if (parsed.results && Array.isArray(parsed.results)) {
+              pendingSources.push(...parsed.results);
+            }
+          } catch { /* ignore parse errors */ }
+        }
+      } else if (msg.role === "assistant" && pendingSources.length > 0) {
+        // Deduplicate by doc_id
+        const seen = new Set<string>();
+        const deduped = pendingSources.filter((s) => {
+          if (seen.has(s.doc_id)) return false;
+          seen.add(s.doc_id);
+          return true;
+        });
+        map.set(msg.id, deduped);
+        pendingSources = [];
+      }
+    }
+    return map;
+  }, [messages, toolInfoMap]);
 
   // Parse <think> tags from streamingDraft (defense-in-depth if backend filter leaks)
   const parsed = streamingDraft
@@ -205,7 +244,13 @@ export default function MessageList() {
         msg.is_summary ? (
           <SummaryDivider key={msg.id} message={msg} />
         ) : (
-          <MessageBubble key={msg.id} message={msg} toolInfoMap={toolInfoMap} />
+          <MessageBubble
+            key={msg.id}
+            message={msg}
+            toolInfoMap={toolInfoMap}
+            knowledgeSources={knowledgeSourcesMap.get(msg.id)}
+            sessionId={currentSessionId || ""}
+          />
         ),
       )}
 

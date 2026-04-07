@@ -90,3 +90,6 @@ class RuntimeResponse(BaseModel):
     # Phase N1: compaction state
     last_compaction_at: Optional[datetime] = None
     compaction_count: int = 0
+    # Phase P3: running detached tasks indicator
+    has_running_detached_tasks: bool = False
+    running_detached_tasks_count: int = 0

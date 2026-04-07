@@ -41,6 +41,11 @@ interface ChatState {
   setContextWarning: (warning: boolean) => void;
   clearJustCompacted: () => void;
 
+  // Skill picker → prompt input bridge
+  pendingInsert: string | null;
+  insertToPrompt: (text: string) => void;
+  clearPendingInsert: () => void;
+
   // SSE handlers
   appendStreamingDraft: (text: string) => void;
   appendStreamingThinking: (text: string) => void;
@@ -74,6 +79,15 @@ export const useChatStore = create<ChatState>((set) => ({
   isLoading: false,
   contextWarning: false,
   justCompacted: false,
+  pendingInsert: null,
+
+  insertToPrompt: (text: string) => {
+    set({ pendingInsert: text });
+  },
+
+  clearPendingInsert: () => {
+    set({ pendingInsert: null });
+  },
 
   fetchMessages: async (sessionId: string) => {
     set({ isLoading: true });
@@ -321,6 +335,7 @@ export const useChatStore = create<ChatState>((set) => ({
       isLoading: false,
       contextWarning: false,
       justCompacted: false,
+      pendingInsert: null,
     });
   },
 }));

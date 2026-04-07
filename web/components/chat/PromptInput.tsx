@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, KeyboardEvent } from "react";
+import { useState, useEffect, KeyboardEvent } from "react";
 import { useChatStore } from "@/store/chat";
 import { useSessionStore } from "@/store/session";
 import { useTaskPlanStore } from "@/store/taskPlan";
@@ -19,6 +19,16 @@ export default function PromptInput({ sessionId }: PromptInputProps) {
   const status = useChatStore((s) => s.status);
   const sendPrompt = useChatStore((s) => s.sendPrompt);
   const cancelTask = useChatStore((s) => s.cancelTask);
+
+  // Consume pending insert from sidebar SkillPicker
+  const pendingInsert = useChatStore((s) => s.pendingInsert);
+  const clearPendingInsert = useChatStore((s) => s.clearPendingInsert);
+  useEffect(() => {
+    if (pendingInsert) {
+      setText((prev) => pendingInsert + prev);
+      clearPendingInsert();
+    }
+  }, [pendingInsert, clearPendingInsert]);
   const updateSessionStatus = useSessionStore((s) => s.updateSessionStatus);
   const clearTaskPlan = useTaskPlanStore((s) => s.clearTaskPlan);
 
@@ -90,6 +100,8 @@ export default function PromptInput({ sessionId }: PromptInputProps) {
                 ? "Queued — waiting for worker..."
                 : status === "waiting"
                   ? "Waiting for permission approval..."
+                  : status === "subtask_waiting"
+                    ? "Waiting for child task to complete..."
                   : "Agent is running..."
           }
           disabled={!canSend || sending}

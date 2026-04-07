@@ -25,6 +25,20 @@ class ScriptTool(BaseTool):
     def description(self) -> str:
         return "Write a temporary Python script and execute it in the workspace venv."
 
+    @property
+    def metadata(self) -> "ToolMetadata":
+        from tools.base import ToolMetadata
+        return ToolMetadata(
+            default_permission="ask",
+            is_read_only=False,
+            is_destructive=False,
+            is_concurrency_safe=False,
+            can_run_in_background=True,
+            result_compressibility="high",
+            access_scope="session_only",
+            mutates_session_state=False,
+        )
+
     def schema(self) -> dict[str, Any]:
         return {
             "type": "object",

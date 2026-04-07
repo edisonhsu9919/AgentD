@@ -37,6 +37,39 @@ def validate_path(boundary: str, path: str) -> str:
     return abs_path
 
 
+def validate_path_dual(
+    primary_boundary: str,
+    parent_boundary: str | None,
+    path: str,
+) -> str:
+    """Resolve path against primary boundary, fallback to parent boundary.
+
+    Phase 6: child agents can read files from the parent session.
+    Tries primary (child session_dir) first, then parent (parent session_dir).
+    Both boundaries are validated for path traversal.
+    Returns the safe absolute path, or raises PermissionError.
+    """
+    # Try primary boundary first
+    try:
+        abs_path = validate_path(primary_boundary, path)
+        if os.path.exists(abs_path):
+            return abs_path
+    except PermissionError:
+        pass
+
+    # Try parent boundary if available
+    if parent_boundary:
+        try:
+            abs_path = validate_path(parent_boundary, path)
+            if os.path.exists(abs_path):
+                return abs_path
+        except PermissionError:
+            pass
+
+    # Neither boundary has this file — raise from primary
+    raise PermissionError(f"Path escape or not found: {path}")
+
+
 def create_workspace(user_id: str) -> str:
     """
     Create the workspace directory for a user and return its absolute path.

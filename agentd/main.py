@@ -26,6 +26,7 @@ async def lifespan(app: FastAPI):
     await _log_runtime_model()
     await _log_runtime_vlm()
     _log_tool_registry()
+    _ensure_knowledge_store()
     await _seed_admin()
 
     # Start PG LISTEN/NOTIFY bridge for cross-process SSE (Phase C)
@@ -40,7 +41,7 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
 
 
-EXPECTED_SCHEMA_VERSION = "013"
+EXPECTED_SCHEMA_VERSION = "014"
 
 
 async def _check_schema_version() -> None:
@@ -130,6 +131,13 @@ def _log_tool_registry() -> None:
     registry = get_registry()
     names = sorted(registry.tools.keys())
     print(f"[startup] Tool registry: {len(names)} tools — {', '.join(names)}")
+
+
+def _ensure_knowledge_store() -> None:
+    """Phase P6-A: ensure knowledge directory structure exists at startup."""
+    from knowledge.store import ensure_knowledge_dirs, get_knowledge_root
+    ensure_knowledge_dirs()
+    print(f"[startup] Knowledge store: {get_knowledge_root()}")
 
 
 async def _seed_admin() -> None:
@@ -228,6 +236,10 @@ app.include_router(admin_router, prefix="/api/admin/users", tags=["admin"])
 from model_config.router import router as model_config_router, runtime_router as model_runtime_router
 app.include_router(model_config_router, prefix="/api/admin/model-configs", tags=["admin-models"])
 app.include_router(model_runtime_router, prefix="/api/admin/runtime", tags=["admin-runtime"])
+
+# Phase P6-D: Knowledge Base API
+from knowledge.router import router as knowledge_router
+app.include_router(knowledge_router, prefix="/api/knowledge", tags=["knowledge"])
 
 
 # ── Health check (Phase I4 — readiness-level) ────────────────────────────────

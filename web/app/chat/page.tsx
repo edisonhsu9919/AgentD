@@ -14,10 +14,11 @@ import PermissionDialog from "@/components/permission/PermissionDialog";
 import WaitingRecoveryBanner from "@/components/permission/WaitingRecoveryBanner";
 import SessionStatusIndicator from "@/components/chat/SessionStatusIndicator";
 import TaskPlanPanel from "@/components/task-plan/TaskPlanPanel";
-import FilePreview from "@/components/preview/FilePreview";
 import PolicySwitcher from "@/components/policy/PolicySwitcher";
 import ContextRingGauge from "@/components/chat/ContextRingGauge";
 import CompactBanner from "@/components/chat/CompactBanner";
+import PanelShell from "@/components/panel/PanelShell";
+import { usePanelStore } from "@/store/panel";
 
 function ChatPageInner() {
   const router = useRouter();
@@ -50,8 +51,9 @@ function ChatPageInner() {
   const justCompacted = useChatStore((s) => s.justCompacted);
 
   const fetchTree = useWorkspaceStore((s) => s.fetchTree);
-  const clearSelection = useWorkspaceStore((s) => s.clearSelection);
-  const selectedFile = useWorkspaceStore((s) => s.selectedFile);
+
+  const clearPanel = usePanelStore((s) => s.clearPanel);
+  const fetchTasks = usePanelStore((s) => s.fetchTasks);
 
   const fetchTaskPlan = useTaskPlanStore((s) => s.fetchTaskPlan);
   const clearTaskPlan = useTaskPlanStore((s) => s.clearTaskPlan);
@@ -65,18 +67,29 @@ function ChatPageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // One-time URL → store sync (only on initial load, not on subsequent URL changes)
-  const initialSynced = useRef(false);
+  // Tracks the last URL value we processed, to avoid re-triggering on the same value.
+  const lastUrlSyncRef = useRef<string | null>(null);
+
+  // URL → store sync: whenever ?s= changes (including from child session links),
+  // update the store. Only fires when the URL value actually changes, not when
+  // currentSessionId changes (which would cause a loop).
   useEffect(() => {
-    if (!initialSynced.current && sessionIdFromUrl) {
-      initialSynced.current = true;
+    if (
+      sessionIdFromUrl &&
+      sessionIdFromUrl !== lastUrlSyncRef.current &&
+      sessionIdFromUrl !== currentSessionId
+    ) {
+      lastUrlSyncRef.current = sessionIdFromUrl;
       selectSession(sessionIdFromUrl);
     }
-  }, [sessionIdFromUrl, selectSession]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionIdFromUrl]);
 
-  // Sync store → URL (one-way: store is the source of truth)
+  // Store → URL sync: keep URL in sync when session changes from sidebar/auto-select.
+  // Updates the ref so the URL→store effect doesn't re-fire for our own write.
   useEffect(() => {
     if (currentSessionId && currentSessionId !== sessionIdFromUrl) {
+      lastUrlSyncRef.current = currentSessionId;
       router.replace(`/chat?s=${currentSessionId}`, { scroll: false });
     }
   }, [currentSessionId, sessionIdFromUrl, router]);
@@ -123,7 +136,7 @@ function ChatPageInner() {
 
     setSessionReady(false);
     resetChat();
-    clearSelection();
+    clearPanel();
     clearTaskPlan();
 
     const enterSession = async () => {
@@ -148,6 +161,7 @@ function ChatPageInner() {
       // 5. Load workspace tree + task plan (non-blocking)
       fetchTree(currentSessionId);
       fetchTaskPlan(currentSessionId);
+      fetchTasks(currentSessionId);
 
       // Mark enter complete — now WaitingRecoveryBanner can safely render
       setSessionReady(true);
@@ -161,7 +175,7 @@ function ChatPageInner() {
   }, [
     currentSessionId,
     resetChat,
-    clearSelection,
+    clearPanel,
     fetchMessages,
     fetchRuntime,
     fetchPendingPermissions,
@@ -169,6 +183,7 @@ function ChatPageInner() {
     fetchTree,
     fetchTaskPlan,
     clearTaskPlan,
+    fetchTasks,
   ]);
 
   // Status badge color + user-friendly labels
@@ -177,6 +192,7 @@ function ChatPageInner() {
     queued: "bg-yellow-500/20 text-yellow-400",
     running: "bg-accent/20 text-accent",
     waiting: "bg-yellow-500/20 text-yellow-500",
+    subtask_waiting: "bg-purple-500/20 text-purple-400",
     error: "bg-danger/20 text-danger",
   };
   const statusLabel: Record<string, string> = {
@@ -184,6 +200,7 @@ function ChatPageInner() {
     queued: "Queued",
     running: "Running",
     waiting: "Waiting",
+    subtask_waiting: "Sub-task",
     error: "Error",
   };
 
@@ -256,6 +273,25 @@ function ChatPageInner() {
             <WaitingRecoveryBanner sessionId={currentSessionId} />
           )}
 
+        {/* Subtask waiting banner */}
+        {chatStatus === "subtask_waiting" && (
+          <div className="flex items-center gap-2 border-t border-purple-500/20 bg-purple-500/5 px-4 py-2">
+            <div className="h-2 w-2 animate-pulse rounded-full bg-purple-400" />
+            <span className="text-xs text-purple-400">
+              Agent is waiting for a child task to complete
+            </span>
+            <button
+              onClick={() => {
+                const { openTaskOutput } = usePanelStore.getState();
+                openTaskOutput();
+              }}
+              className="ml-auto rounded bg-purple-500/20 px-2 py-0.5 text-[10px] text-purple-400 transition hover:bg-purple-500/30"
+            >
+              View Task
+            </button>
+          </div>
+        )}
+
         {/* Compact banner: show when SSE context_warning or ratio > 0.7,
             but suppress after a successful compact until next real model call */}
         {!justCompacted &&
@@ -270,12 +306,8 @@ function ChatPageInner() {
         <PromptInput sessionId={currentSessionId} />
       </div>
 
-      {/* File preview panel (shown when a file is selected) */}
-      {selectedFile && (
-        <div className="w-80 shrink-0">
-          <FilePreview sessionId={currentSessionId} />
-        </div>
-      )}
+      {/* Work panel (half-screen overlay) */}
+      <PanelShell sessionId={currentSessionId} />
     </div>
   );
 }

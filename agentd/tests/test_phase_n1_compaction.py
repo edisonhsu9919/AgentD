@@ -499,11 +499,23 @@ class TestGenerateSummary:
 
     @pytest.mark.asyncio
     async def test_first_attempt_success(self):
-        """Valid JSON on first attempt → return directly."""
-        valid_json = _valid_summary_json()
+        """Valid Markdown on first attempt → return directly."""
+        valid_md = (
+            "# Session Title\nPDF Rename\n\n"
+            "# Current State\nProcessing files\n\n"
+            "# Task Specification\nHelp user rename PDFs based on content\n\n"
+            "# Files and Artifacts\n- report.pdf\n\n"
+            "# Workflow Patterns\n(none)\n\n"
+            "# Errors & Corrections\n(none)\n\n"
+            "# Active Skill / Plan\npdf-rename v1.2.0\n\n"
+            "# Subtasks\n(none)\n\n"
+            "# Key Results\n- Identified 3 PDF files\n\n"
+            "# Next Steps\n- Process remaining files\n\n"
+            "# Worklog\n- Started PDF analysis\n"
+        )
 
         mock_result = MagicMock()
-        mock_result.content = valid_json
+        mock_result.content = valid_md
 
         with patch("agent.compaction.AsyncSessionLocal") as mock_db_ctx, \
              patch("agent.compaction.ChatOpenAI") as mock_llm_cls:
@@ -521,20 +533,24 @@ class TestGenerateSummary:
                 msgs = [_sys(), _human(idx=0), _ai(idx=0)]
                 result = await generate_summary(msgs, [1, 2], "test-model")
 
-                parsed = json.loads(result)
-                assert "rename PDFs" in parsed["session_intent"]
-                # Only one LLM call
+                assert "# Current State" in result
+                assert "rename PDFs" in result
                 assert mock_llm.ainvoke.call_count == 1
 
     @pytest.mark.asyncio
     async def test_retry_on_invalid_first_attempt(self):
-        """Invalid first attempt → retry → succeed."""
-        valid_json = _valid_summary_json()
+        """Invalid first attempt → retry → succeed with Markdown."""
+        valid_md = (
+            "# Session Title\nTest\n\n"
+            "# Current State\nDone\n\n"
+            "# Task Specification\nHelp user rename PDFs\n\n"
+            "# Next Steps\n- Continue\n"
+        )
 
         bad_result = MagicMock()
         bad_result.content = "Acknowledged. Ready for next round."
         good_result = MagicMock()
-        good_result.content = valid_json
+        good_result.content = valid_md
 
         with patch("agent.compaction.AsyncSessionLocal") as mock_db_ctx, \
              patch("agent.compaction.ChatOpenAI") as mock_llm_cls:
@@ -552,14 +568,12 @@ class TestGenerateSummary:
                 msgs = [_sys(), _human(idx=0), _ai(idx=0)]
                 result = await generate_summary(msgs, [1, 2], "test-model")
 
-                parsed = json.loads(result)
-                assert "rename PDFs" in parsed["session_intent"]
-                # Two LLM calls: first failed, second succeeded
+                assert "# Current State" in result
                 assert mock_llm.ainvoke.call_count == 2
 
     @pytest.mark.asyncio
     async def test_fallback_on_double_failure(self):
-        """Both attempts invalid → fallback to unstructured."""
+        """Both attempts invalid → fallback to raw text."""
         bad_result = MagicMock()
         bad_result.content = "I don't understand the format."
 
@@ -579,19 +593,17 @@ class TestGenerateSummary:
                 msgs = [_sys(), _human(idx=0), _ai(idx=0)]
                 result = await generate_summary(msgs, [1, 2], "test-model")
 
-                parsed = json.loads(result)
-                assert parsed["_unstructured"] is True
-                assert "I don't understand" in parsed["session_intent"]
-                # Two LLM calls
+                # Fallback returns raw text
+                assert "I don't understand" in result
                 assert mock_llm.ainvoke.call_count == 2
 
     @pytest.mark.asyncio
     async def test_empty_input_returns_default(self):
-        """Empty compactable messages → return default JSON."""
+        """Empty compactable messages → return default Markdown."""
         msgs = [_sys()]
         result = await generate_summary(msgs, [], "test-model")
-        parsed = json.loads(result)
-        assert "No significant content" in parsed["session_intent"]
+        assert "# Session Title" in result
+        assert "No significant content" in result
 
 
 # ── Test: compact_session orchestration (mocked) ───────────────────────────

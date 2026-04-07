@@ -39,7 +39,7 @@ class TestMigration011(unittest.TestCase):
 
     def test_expected_schema_version(self):
         from main import EXPECTED_SCHEMA_VERSION
-        assert EXPECTED_SCHEMA_VERSION == "013"
+        assert EXPECTED_SCHEMA_VERSION == "014"
 
     def test_agent_run_model_has_diagnostics(self):
         from agent.run_models import AgentRun
@@ -342,7 +342,7 @@ class TestPromptAssemblyTrace(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             _, diag = build_system_prompt(agent_id="build", session_dir=tmpdir)
         order = diag["prompt_assembly_order"]
-        expected_names = ["header", "role", "rules", "task_plan", "skills", "compaction_context"]
+        expected_names = ["role", "rules", "header", "skills", "task_plan", "compaction_context"]
         actual_names = [entry["name"] for entry in order]
         self.assertEqual(actual_names, expected_names)
         for entry in order:
@@ -433,7 +433,7 @@ class TestMigration012(unittest.TestCase):
 
     def test_expected_schema_version(self):
         from main import EXPECTED_SCHEMA_VERSION
-        assert EXPECTED_SCHEMA_VERSION == "013"
+        assert EXPECTED_SCHEMA_VERSION == "014"
 
     def test_model_config_has_context_window(self):
         from model_config.models import ModelConfig

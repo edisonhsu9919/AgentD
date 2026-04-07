@@ -6,6 +6,7 @@ import { useChatStore } from "@/store/chat";
 import { useSessionStore } from "@/store/session";
 import { useWorkspaceStore } from "@/store/workspace";
 import { useTaskPlanStore } from "@/store/taskPlan";
+import { usePanelStore } from "@/store/panel";
 import { showToast } from "@/components/ui/Toast";
 import type { SSEEvent } from "@/lib/types";
 
@@ -57,6 +58,12 @@ export function useSSE(sessionId: string | null) {
 
   const fetchTree = useWorkspaceStore((s) => s.fetchTree);
   const fetchTaskPlan = useTaskPlanStore((s) => s.fetchTaskPlan);
+
+  const setPanelContent = usePanelStore((s) => s.setPanelContent);
+  const addTask = usePanelStore((s) => s.addTask);
+  const updateTaskStatus = usePanelStore((s) => s.updateTaskStatus);
+  const appendTaskLog = usePanelStore((s) => s.appendTaskLog);
+  const fetchTasksFromAPI = usePanelStore((s) => s.fetchTasks);
 
   // --- Typing loop helpers ---
 
@@ -157,6 +164,31 @@ export function useSSE(sessionId: string | null) {
           ) {
             fetchTree(sessionId);
           }
+          // Auto-open Task Output when a background task launches successfully
+          if (
+            (event.tool_name === "launch_detached_process" ||
+              event.tool_name === "launch_subagent") &&
+            !event.is_error
+          ) {
+            try {
+              const output = JSON.parse(event.output);
+              if (
+                output.status === "launched" ||
+                output.status === "waiting_for_child"
+              ) {
+                const ps = usePanelStore.getState();
+                if (!ps.open) {
+                  ps.openTaskOutput();
+                } else if (ps.activeType !== "task_output") {
+                  ps.setTabAttention("task_output", true);
+                }
+                // Immediately reconcile task list so child session entry is visible
+                fetchTasksFromAPI(sessionId);
+              }
+            } catch {
+              // output parse failed — ignore
+            }
+          }
           break;
 
         case "status_change":
@@ -187,6 +219,8 @@ export function useSSE(sessionId: string | null) {
           // A real model call completed — runtime ratio is now fresh,
           // so clear the justCompacted suppression flag.
           clearJustCompacted();
+          // Reconcile task list from API after run completes
+          fetchTasksFromAPI(sessionId);
           // Keep streaming content visible until persisted messages arrive
           fetchMessages(sessionId).finally(() => {
             clearStreaming();
@@ -208,6 +242,43 @@ export function useSSE(sessionId: string | null) {
           fetchMessages(sessionId);
           fetchRuntime(sessionId);
           showToast("info", `Context compacted — saved ${event.tokens_saved.toLocaleString()} tokens`);
+          break;
+
+        case "panel_update":
+          setPanelContent(event.panel_type, event.panel_content);
+          break;
+
+        case "panel_submit":
+          // Backend confirms receipt — no action needed, HtmlAppPanel handles UI
+          break;
+
+        case "task_started":
+          addTask({
+            task_id: event.task_id,
+            session_id: sessionId,
+            task_kind: event.task_kind,
+            blocking_mode: event.task_kind === "child_session" ? "blocking" : "detached",
+            status: event.status === "waiting_for_child" ? "waiting" : "running",
+            title: event.task_id,
+            command: "",
+            spawned_by_tool: "",
+            tool_call_id: "",
+            child_session_id: event.child_session_id || null,
+            pid: null,
+            artifact_root: "",
+            stdout_path: "",
+            stderr_path: "",
+            created_at: event.timestamp,
+            updated_at: event.timestamp,
+          });
+          break;
+
+        case "task_completed":
+          updateTaskStatus(event.task_id, "completed");
+          break;
+
+        case "task_failed":
+          updateTaskStatus(event.task_id, "failed");
           break;
 
         case "error": {
@@ -258,6 +329,11 @@ export function useSSE(sessionId: string | null) {
     fetchTaskPlan,
     setContextWarning,
     clearJustCompacted,
+    setPanelContent,
+    addTask,
+    updateTaskStatus,
+    appendTaskLog,
+    fetchTasksFromAPI,
     startTypingLoop,
     flushBuffer,
     clearBuffer,

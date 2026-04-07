@@ -217,29 +217,40 @@ async def generate_summary(
     compactable_indices: list[int],
     model_id: str,
 ) -> str:
-    """Generate a structured JSON summary of compactable messages.
+    """Generate a Markdown summary of compactable messages (Phase P5 upgrade).
+
+    The summary uses the same chapter structure as session_memory.md,
+    so that hard compact's main path (memory-first) and fallback path
+    (LLM summary) produce the same format.
 
     Flow:
-    1. Call LLM with strict JSON prompt
-    2. Validate response against schema
-    3. On validation failure, retry once with explicit correction
-    4. If still invalid, fallback to plain text marked as unstructured
+    1. Call LLM with Markdown chapter prompt
+    2. Validate that response contains key chapter headings
+    3. On validation failure, retry once
+    4. If still invalid, return raw text (unstructured fallback)
 
-    Returns the summary text (to be prefixed with [Context Summary]).
+    Returns the summary Markdown text.
     """
+    from agent.session_memory import MEMORY_CHAPTERS, _validate_memory_structure
+
     system_prompt = _SUMMARY_PROMPT_PATH.read_text(encoding="utf-8").strip()
     conversation_text = _build_summary_input(messages, compactable_indices)
 
     if not conversation_text.strip():
-        return json.dumps({
-            "session_intent": "No significant content to summarize.",
-            "key_decisions": [],
-            "current_task_state": "Empty",
-            "active_skill": None,
-            "important_artifacts": [],
-            "conversation_highlights": [],
-            "next_steps": [],
-        })
+        # Return minimal Markdown structure
+        return (
+            "# Session Title\n(empty session)\n\n"
+            "# Current State\nNo significant content to summarize.\n\n"
+            "# Task Specification\n(none)\n\n"
+            "# Files and Artifacts\n(none)\n\n"
+            "# Workflow Patterns\n(none)\n\n"
+            "# Errors & Corrections\n(none)\n\n"
+            "# Active Skill / Plan\n(none)\n\n"
+            "# Subtasks\n(none)\n\n"
+            "# Key Results\n(none)\n\n"
+            "# Next Steps\n(none)\n\n"
+            "# Worklog\n(empty)\n"
+        )
 
     from model_config.service import resolve_active_model_config
 
@@ -267,20 +278,17 @@ async def generate_summary(
         LCHumanMessage(content=conversation_text),
     ])
     raw = _strip_model_tags(result.content or "").strip()
-    parsed = _validate_summary_json(raw)
 
-    if parsed is not None:
-        return json.dumps(parsed, ensure_ascii=False)
+    if _validate_memory_structure(raw):
+        return raw
 
-    # Attempt 2: retry with explicit correction
-    logger.warning("Summary JSON validation failed on attempt 1, retrying with correction prompt")
+    # Attempt 2: retry with correction
+    logger.warning("Summary Markdown validation failed on attempt 1, retrying")
     retry_prompt = (
-        "Your previous response was not valid JSON. "
-        "You MUST respond with ONLY a valid JSON object with these exact keys: "
-        "session_intent (string), key_decisions (array), current_task_state (string), "
-        "active_skill (string or null), important_artifacts (array), "
-        "conversation_highlights (array), next_steps (array). "
-        "No markdown, no explanation. Just the JSON object."
+        "Your previous response did not contain the required chapter headings. "
+        "You MUST respond with a complete Markdown document containing these exact headings:\n"
+        + "\n".join(f"# {ch}" for ch in MEMORY_CHAPTERS)
+        + "\n\nOutput only the Markdown document, no fences or extra text."
     )
     result2 = await llm.ainvoke([
         LCSystemMessage(content=system_prompt),
@@ -288,35 +296,27 @@ async def generate_summary(
         LCSystemMessage(content=retry_prompt),
     ])
     raw2 = _strip_model_tags(result2.content or "").strip()
-    parsed2 = _validate_summary_json(raw2)
 
-    if parsed2 is not None:
-        return json.dumps(parsed2, ensure_ascii=False)
+    if _validate_memory_structure(raw2):
+        return raw2
 
-    # Fallback: wrap raw text as unstructured summary
-    logger.warning("Summary JSON validation failed on retry, falling back to unstructured")
-    fallback = {
-        "session_intent": raw[:500] if raw else "Summary generation produced unstructured output.",
-        "key_decisions": [],
-        "current_task_state": "unknown",
-        "active_skill": None,
-        "important_artifacts": [],
-        "conversation_highlights": [],
-        "next_steps": [],
-        "_unstructured": True,
-        "_raw_summary": raw[:2000] if raw else "",
-    }
-    return json.dumps(fallback, ensure_ascii=False)
+    # Fallback: return raw text as-is (unstructured)
+    logger.warning("Summary Markdown validation failed on retry, using raw text")
+    return raw if raw else "(Summary generation failed)"
 
 
 # ── Context summary JSON artifact ────────────────────────────────────────────
 
 
 def _parse_summary_sections(summary_text: str) -> dict[str, Any]:
-    """Parse the structured summary into sections for context_summary.json.
+    """Parse summary into sections for context_summary.json.
 
-    Accepts JSON string (preferred) or legacy Markdown heading format (fallback).
-    Returns dict with the 6 standard keys.
+    Phase P5: accepts three formats in priority order:
+    1. Markdown with session_memory.md chapter headings (new primary)
+    2. JSON string (legacy N1/N2 format)
+    3. Legacy Markdown with uppercase headings
+
+    Returns dict with standard keys for context_summary.json.
     """
     defaults: dict[str, Any] = {
         "session_intent": "",
@@ -328,21 +328,64 @@ def _parse_summary_sections(summary_text: str) -> dict[str, Any]:
         "next_steps": [],
     }
 
-    # Try JSON first (new strict format)
+    # Format 1: session_memory.md-style Markdown chapters
+    # Map chapter headings to context_summary keys
+    chapter_map = {
+        "Task Specification": "session_intent",
+        "Current State": "current_task_state",
+        "Key Results": "key_decisions",
+        "Active Skill / Plan": "active_skill",
+        "Files and Artifacts": "important_artifacts",
+        "Workflow Patterns": "conversation_highlights",
+        "Next Steps": "next_steps",
+    }
+
+    if "# Current State" in summary_text or "# Task Specification" in summary_text:
+        chapters: dict[str, str] = {}
+        current_chapter = None
+        current_lines: list[str] = []
+
+        for line in summary_text.split("\n"):
+            if line.startswith("# "):
+                if current_chapter:
+                    chapters[current_chapter] = "\n".join(current_lines).strip()
+                current_chapter = line[2:].strip()
+                current_lines = []
+            else:
+                current_lines.append(line)
+        if current_chapter:
+            chapters[current_chapter] = "\n".join(current_lines).strip()
+
+        for chapter_name, key in chapter_map.items():
+            if chapter_name in chapters:
+                value = chapters[chapter_name]
+                # For list-type fields, split by lines starting with -
+                if key in ("key_decisions", "important_artifacts", "conversation_highlights", "next_steps"):
+                    items = [l.lstrip("- ").strip() for l in value.split("\n") if l.strip().startswith("-")]
+                    if items:
+                        defaults[key] = items
+                    elif value and value != "(none)":
+                        defaults[key] = [value]
+                else:
+                    if value and value != "(none)" and value != "(empty)":
+                        defaults[key] = value
+
+        return defaults
+
+    # Format 2: JSON (legacy N1/N2)
     try:
         data = json.loads(summary_text)
         if isinstance(data, dict):
             for key in defaults:
                 if key in data:
                     defaults[key] = data[key]
-            # Carry forward unstructured marker if present
             if data.get("_unstructured"):
                 defaults["_unstructured"] = True
             return defaults
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Legacy fallback: Markdown heading parser
+    # Format 3: Legacy Markdown with uppercase headings
     heading_map = {
         "SESSION INTENT": "session_intent",
         "KEY DECISIONS": "key_decisions",
@@ -352,7 +395,7 @@ def _parse_summary_sections(summary_text: str) -> dict[str, Any]:
         "NEXT STEPS": "next_steps",
     }
     current_key = None
-    current_lines: list[str] = []
+    current_lines = []
 
     for line in summary_text.split("\n"):
         stripped = line.strip().lstrip("#").strip()
@@ -536,12 +579,33 @@ async def compact_session(
 
     original_count = len(messages)
 
-    # 3. Generate summary
+    # 3. Generate summary — Phase P4-D: memory-first strategy
+    #    Read session_memory.md if available; fallback to LLM summary
+    summary_text = None
+    used_memory = False
+
     try:
-        summary_text = await generate_summary(messages, compactable_indices, model_id)
+        from agent.session_memory import read_memory, read_meta as read_memory_meta, write_meta as write_memory_meta
+
+        memory_content = read_memory(session_dir)
+        memory_meta = read_memory_meta(session_dir)
+
+        if memory_content and memory_meta.get("memory_valid"):
+            # Memory-first: use session_memory.md as the summary source
+            summary_text = memory_content
+            used_memory = True
+            logger.info("Hard compact using session_memory.md (version=%d)",
+                        memory_meta.get("snapshot_version", 0))
     except Exception as e:
-        logger.error("Compaction summary generation failed: %s", e, exc_info=True)
-        return {"compacted": False, "reason": "summary_generation_failed", "error": str(e)}
+        logger.warning("Failed to read session memory for hard compact: %s", e)
+
+    if summary_text is None:
+        # Fallback: generate summary via LLM (old N1 path)
+        try:
+            summary_text = await generate_summary(messages, compactable_indices, model_id)
+        except Exception as e:
+            logger.error("Compaction summary generation failed: %s", e, exc_info=True)
+            return {"compacted": False, "reason": "summary_generation_failed", "error": str(e)}
 
     # 4. Persist DB summary message
     try:
@@ -590,6 +654,18 @@ async def compact_session(
         except Exception:
             pass
 
+    # Phase P4-D: transition state machine to post_hard_compact
+    try:
+        from agent.session_memory import read_meta as read_memory_meta, write_meta as write_memory_meta
+        memory_meta = read_memory_meta(session_dir)
+        memory_meta["pre_hard_compact"] = False
+        memory_meta["post_hard_compact"] = True
+        memory_meta["last_hard_compaction_at"] = datetime.now(timezone.utc).isoformat()
+        memory_meta["boundary_seq"] = len(messages) - 1
+        write_memory_meta(session_dir, memory_meta)
+    except Exception as e:
+        logger.warning("Failed to update memory meta after hard compact: %s", e)
+
     result = {
         "compacted": True,
         "original_count": original_count,
@@ -597,6 +673,8 @@ async def compact_session(
         "compacted_count": len(compactable_indices),
         "protected_count": len(protected_indices),
         "frontier_count": len(frontier_indices),
+        "used_memory": used_memory,
+        "compaction_mode": "memory_first" if used_memory else "llm_fallback",
     }
     logger.info("Compaction complete for session %s: %s", session_id, result)
     return result

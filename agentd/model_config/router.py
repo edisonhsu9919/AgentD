@@ -338,4 +338,15 @@ async def get_runtime_diagnostics(
             "db_max_overflow": settings.db_max_overflow,
             "debug": settings.debug,
         },
+        "tools": _get_tools_metadata(),
     })
+
+
+def _get_tools_metadata() -> dict:
+    """Collect metadata from all registered tools for diagnostics."""
+    from tools.registry import get_registry
+    registry = get_registry()
+    return {
+        "count": len(registry.tools),
+        "metadata": registry.list_tool_metadata(),
+    }

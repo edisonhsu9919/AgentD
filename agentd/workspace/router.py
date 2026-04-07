@@ -488,3 +488,106 @@ async def workspace_delete(
         entry_type = "file"
 
     return ok({"deleted": True, "path": path, "type": entry_type})
+
+
+# ── File inspection endpoint (Phase P1) ────────────────────────────────────
+
+# Extensions that support structured inspection
+_INSPECTABLE_EXTENSIONS = {
+    ".pdf", ".docx", ".xlsx", ".pptx", ".eml",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
+}
+
+
+@router.get("/{session_id}/workspace/inspect")
+async def workspace_inspect(
+    session_id: uuid.UUID,
+    path: str = Query(..., description="Relative path within session directory"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return structured reconnaissance for a file (Phase P1).
+
+    Directly invokes the same extraction layers used by the file_inspect
+    agent tool, but as a REST endpoint independent of the agent loop.
+    Frontend calls this when a user clicks a file in the sidebar to
+    populate the right-side panel preview.
+
+    Supported: PDF, DOCX, XLSX, PPTX, EML, PNG/JPG/WEBP/BMP/GIF.
+    Unsupported extensions return preview_mode + basic metadata only.
+    """
+    session_dir = await _get_session_dir(session_id, db, current_user)
+    _reject_internal(path)
+    try:
+        abs_path = validate_path(session_dir, path)
+    except PermissionError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "VALIDATION_ERROR", "message": "Invalid path"},
+        )
+
+    if not os.path.isfile(abs_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": f"File not found: {path}"},
+        )
+
+    _, ext = os.path.splitext(abs_path)
+    ext = ext.lower()
+
+    if ext not in _INSPECTABLE_EXTENSIONS:
+        # Return basic metadata for non-inspectable files
+        stat = os.stat(abs_path)
+        mime, _ = mimetypes.guess_type(abs_path)
+        is_previewable, preview_mode, download_only = _get_preview_info(ext)
+        return ok({
+            "path": path,
+            "kind": "file",
+            "inspectable": False,
+            "preview_mode": preview_mode,
+            "size_bytes": stat.st_size,
+            "mime_type": mime or "application/octet-stream",
+        })
+
+    # Dispatch to extraction layers
+    result = await _extract_file_info(abs_path, ext)
+    result["path"] = path
+    result["inspectable"] = True
+    return ok(result)
+
+
+async def _extract_file_info(abs_path: str, ext: str) -> dict:
+    """Dispatch to the appropriate extraction layer."""
+    try:
+        if ext == ".pdf":
+            from files.pdf import extract
+            return extract(abs_path)
+
+        if ext == ".docx":
+            from files.office_docx import extract
+            return extract(abs_path)
+
+        if ext == ".xlsx":
+            from files.office_xlsx import extract
+            return extract(abs_path)
+
+        if ext == ".pptx":
+            from files.office_pptx import extract
+            return extract(abs_path)
+
+        if ext == ".eml":
+            from files.email_eml import extract
+            return extract(abs_path)
+
+        if ext in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
+            from files.image import extract_metadata
+            return extract_metadata(abs_path)
+
+    except FileNotFoundError:
+        return {"kind": "error", "message": f"File not found: {abs_path}"}
+    except ValueError as e:
+        return {"kind": "error", "message": f"Invalid file: {e}"}
+    except Exception as e:
+        return {"kind": "error", "message": f"Inspection failed: {e}"}
+
+    return {"kind": "unknown", "message": f"No extractor for {ext}"}

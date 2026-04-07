@@ -4,7 +4,7 @@ import os
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
@@ -159,6 +159,7 @@ async def get_runtime(
         "queued": "queued",
         "running": "running",
         "waiting": "permission_waiting",
+        "subtask_waiting": "subtask_waiting",
         "error": "error",
     }
     phase = phase_map.get(session.status)
@@ -211,6 +212,28 @@ async def get_runtime(
     except Exception:
         pass
 
+    # Phase P3: running detached tasks count
+    running_detached_count = 0
+    try:
+        from agent.task_models import SessionTask
+        from sqlalchemy import select as sa_select, func as sa_func
+        import session.models as _sm  # noqa: F401
+
+        count_stmt = (
+            sa_select(sa_func.count())
+            .select_from(SessionTask)
+            .where(
+                SessionTask.session_id == session_id,
+                SessionTask.task_kind == "process",
+                SessionTask.status == "running",
+            )
+        )
+        result = await db.execute(count_stmt)
+        val = result.scalar_one()
+        running_detached_count = int(val) if val is not None else 0
+    except Exception:
+        running_detached_count = 0
+
     runtime = RuntimeResponse(
         session_id=session.id,
         status=session.status,
@@ -226,6 +249,8 @@ async def get_runtime(
         context_usage_ratio=ctx_ratio,
         last_compaction_at=last_compaction_at,
         compaction_count=compaction_count,
+        has_running_detached_tasks=running_detached_count > 0,
+        running_detached_tasks_count=running_detached_count,
     )
     return ok(runtime.model_dump(mode="json"))
 
@@ -721,3 +746,298 @@ async def list_session_runs(
         }
         for r in rows
     ])
+
+
+# ── Task endpoints (Phase P3) ──────────────────────────────────────────────
+
+
+@router.get("/{session_id}/tasks")
+async def list_session_tasks(
+    session_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List all tasks (detached + child) for a session.
+
+    Phase P3: Used by Task Output panel to reconcile task state on open,
+    after run done, and on page refresh. Does not rely on SSE.
+    """
+    from agent.task_models import SessionTask
+    from sqlalchemy import select
+    import session.models  # noqa: F401
+    import auth.models  # noqa: F401
+
+    session = await session_svc.get_session(db, session_id)
+    if not session or session.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Session not found"},
+        )
+
+    stmt = (
+        select(SessionTask)
+        .where(SessionTask.session_id == session_id)
+        .order_by(SessionTask.created_at.desc())
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+
+    return ok([
+        {
+            "id": str(t.id),
+            "task_kind": t.task_kind,
+            "blocking_mode": t.blocking_mode,
+            "status": t.status,
+            "title": t.title,
+            "command": t.command,
+            "child_session_id": str(t.child_session_id) if t.child_session_id else None,
+            "pid": t.pid,
+            "artifact_root": t.artifact_root,
+            "result_ref": t.result_ref,
+            "error": t.error,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "updated_at": t.updated_at.isoformat() if t.updated_at else None,
+        }
+        for t in rows
+    ])
+
+
+@router.get("/{session_id}/tasks/{task_id}")
+async def get_session_task(
+    session_id: uuid.UUID,
+    task_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get details for a single task."""
+    from agent.task_models import SessionTask
+    import session.models  # noqa: F401
+
+    session = await session_svc.get_session(db, session_id)
+    if not session or session.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Session not found"},
+        )
+
+    task = await db.get(SessionTask, task_id)
+    if not task or task.session_id != session_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Task not found"},
+        )
+
+    return ok({
+        "id": str(task.id),
+        "task_kind": task.task_kind,
+        "blocking_mode": task.blocking_mode,
+        "status": task.status,
+        "title": task.title,
+        "command": task.command,
+        "child_session_id": str(task.child_session_id) if task.child_session_id else None,
+        "pid": task.pid,
+        "stdout_path": task.stdout_path,
+        "stderr_path": task.stderr_path,
+        "artifact_root": task.artifact_root,
+        "result_ref": task.result_ref,
+        "error": task.error,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+        "updated_at": task.updated_at.isoformat() if task.updated_at else None,
+    })
+
+
+@router.get("/{session_id}/tasks/{task_id}/stdout")
+async def get_task_stdout(
+    session_id: uuid.UUID,
+    task_id: uuid.UUID,
+    tail: int = Query(100, ge=1, le=5000, description="Number of tail lines"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get the last N lines of a task's stdout log."""
+    from agent.task_models import SessionTask
+    from agent.tasks import read_task_stdout
+    from workspace.manager import get_session_dir
+    import session.models  # noqa: F401
+
+    session = await session_svc.get_session(db, session_id)
+    if not session or session.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Session not found"},
+        )
+
+    task = await db.get(SessionTask, task_id)
+    if not task or task.session_id != session_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Task not found"},
+        )
+
+    session_dir = get_session_dir(current_user.workspace, str(session_id))
+    output = read_task_stdout(session_dir, str(task_id), tail_lines=tail)
+
+    return ok({"task_id": str(task_id), "lines": tail, "stdout": output})
+
+
+@router.post("/{session_id}/tasks/{task_id}/stop")
+async def stop_session_task(
+    session_id: uuid.UUID,
+    task_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Stop a running detached process task.
+
+    Sends SIGTERM to the process and updates status to cancelled.
+    Only applies to task_kind=process with status=running.
+    """
+    import signal
+    from agent.task_models import SessionTask
+    from agent.tasks import update_task_status
+    from workspace.manager import get_session_dir
+    import session.models  # noqa: F401
+
+    session = await session_svc.get_session(db, session_id)
+    if not session or session.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Session not found"},
+        )
+
+    task = await db.get(SessionTask, task_id)
+    if not task or task.session_id != session_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Task not found"},
+        )
+
+    if task.task_kind != "process":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "VALIDATION_ERROR", "message": "Only process tasks can be stopped"},
+        )
+
+    if task.status != "running":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "CONFLICT", "message": f"Task is not running (status={task.status})"},
+        )
+
+    # Send SIGTERM to the process
+    stopped = False
+    if task.pid:
+        try:
+            import os as _os
+            _os.kill(task.pid, signal.SIGTERM)
+            stopped = True
+        except ProcessLookupError:
+            stopped = True  # Already dead
+        except OSError as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"code": "INTERNAL_ERROR", "message": f"Failed to stop process: {e}"},
+            )
+
+    # Update DB status
+    task.status = "cancelled"
+    task.error = "stopped_by_user"
+    await db.commit()
+
+    # Update filesystem
+    session_dir = get_session_dir(current_user.workspace, str(session_id))
+    update_task_status(session_dir, str(task_id), "cancelled", error="stopped_by_user")
+
+    return ok({
+        "stopped": stopped,
+        "task_id": str(task_id),
+        "status": "cancelled",
+        "pid": task.pid,
+    })
+
+
+# ── Panel submit endpoint (Phase P6-E / html_app) ─────────────────────────
+
+
+@router.post("/{session_id}/panel-submit")
+async def panel_submit(
+    session_id: uuid.UUID,
+    body: dict = Body(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Receive user input from an html_app panel interaction.
+
+    The frontend iframe posts user form data via postMessage → host → this API.
+    The backend writes the response to a file that the detached task can poll,
+    and publishes a panel_submit SSE event.
+
+    Expected body:
+    {
+        "interaction_id": "...",
+        "callback_task_id": "...",  // optional
+        "data": { ... user form data ... }
+    }
+    """
+    session = await session_svc.get_session(db, session_id)
+    if not session or session.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Session not found"},
+        )
+
+    interaction_id = body.get("interaction_id", "")
+    callback_task_id = body.get("callback_task_id", "")
+    data = body.get("data", {})
+
+    if not interaction_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "VALIDATION_ERROR", "message": "interaction_id is required"},
+        )
+
+    # Write response to task artifact for detached process to consume
+    if callback_task_id:
+        from workspace.manager import get_session_dir
+        session_dir = get_session_dir(current_user.workspace, str(session_id))
+        _write_panel_response(session_dir, callback_task_id, interaction_id, data)
+
+    # Publish SSE event so any listener can react
+    from core.event_bridge import notify
+    try:
+        await notify(str(session_id), {
+            "event": "panel_submit",
+            "interaction_id": interaction_id,
+            "callback_task_id": callback_task_id,
+            "data": data,
+        })
+    except Exception:
+        pass  # Best-effort SSE
+
+    return ok({
+        "received": True,
+        "interaction_id": interaction_id,
+        "callback_task_id": callback_task_id,
+    })
+
+
+def _write_panel_response(
+    session_dir: str, task_id: str, interaction_id: str, data: dict,
+) -> None:
+    """Write panel response to task artifact directory.
+
+    The detached process polls for this file to receive user input.
+    """
+    import json as _json
+
+    task_dir = os.path.join(session_dir, ".agentd", "tasks", task_id)
+    os.makedirs(task_dir, exist_ok=True)
+
+    response_path = os.path.join(task_dir, "panel_response.json")
+    with open(response_path, "w", encoding="utf-8") as f:
+        _json.dump({
+            "interaction_id": interaction_id,
+            "data": data,
+            "received_at": __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc
+            ).isoformat(),
+        }, f, ensure_ascii=False, indent=2)

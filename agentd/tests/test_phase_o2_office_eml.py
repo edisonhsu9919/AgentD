@@ -446,7 +446,7 @@ class TestRegistryO2:
         from tools.registry import get_registry
 
         registry = get_registry()
-        assert len(registry.tools) == 11
+        assert len(registry.tools) == 16
 
     def test_file_inspect_description_mentions_office(self):
         from tools.registry import get_registry

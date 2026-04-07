@@ -8,6 +8,7 @@ import {
   FolderOpen,
   ChevronRight,
   ChevronDown,
+  Trash2,
 } from "lucide-react";
 
 interface FileTreeNodeProps {
@@ -15,6 +16,7 @@ interface FileTreeNodeProps {
   depth: number;
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  onDelete?: (path: string) => void;
 }
 
 function FileTreeNode({
@@ -22,6 +24,7 @@ function FileTreeNode({
   depth,
   selectedPath,
   onSelect,
+  onDelete,
 }: FileTreeNodeProps) {
   const [expanded, setExpanded] = useState(depth < 2);
   const isDir = node.type === "dir";
@@ -56,6 +59,7 @@ function FileTreeNode({
                 depth={depth + 1}
                 selectedPath={selectedPath}
                 onSelect={onSelect}
+                onDelete={onDelete}
               />
             ))}
           </div>
@@ -65,18 +69,34 @@ function FileTreeNode({
   }
 
   return (
-    <button
-      onClick={() => onSelect(node.path)}
-      className={`flex w-full items-center gap-1.5 rounded px-2 py-1 text-sm transition ${
+    <div
+      className={`group flex w-full items-center rounded text-sm transition ${
         isSelected
           ? "bg-accent/10 text-accent"
           : "text-text-secondary hover:bg-bg-tertiary/50"
       }`}
       style={{ paddingLeft: `${depth * 12 + 20}px` }}
     >
-      <File size={14} />
-      <span className="truncate">{node.name}</span>
-    </button>
+      <button
+        onClick={() => onSelect(node.path)}
+        className="flex min-w-0 flex-1 items-center gap-1.5 py-1"
+      >
+        <File size={14} />
+        <span className="truncate">{node.name}</span>
+      </button>
+      {onDelete && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(node.path);
+          }}
+          className="mr-1 shrink-0 rounded p-0.5 opacity-0 transition hover:bg-danger/10 hover:text-danger group-hover:opacity-100"
+          title="Delete file"
+        >
+          <Trash2 size={12} />
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -84,12 +104,14 @@ interface FileTreeProps {
   tree: FileNode[];
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  onDelete?: (path: string) => void;
 }
 
 export default function FileTree({
   tree,
   selectedPath,
   onSelect,
+  onDelete,
 }: FileTreeProps) {
   if (tree.length === 0) {
     return (
@@ -108,6 +130,7 @@ export default function FileTree({
           depth={0}
           selectedPath={selectedPath}
           onSelect={onSelect}
+          onDelete={onDelete}
         />
       ))}
     </div>

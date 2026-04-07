@@ -10,9 +10,12 @@ Does NOT own scheduling, claim, or task lifecycle — that's scheduler + worker.
 """
 
 import asyncio
+import logging
 import traceback
 import uuid
 from typing import Any, Callable, Coroutine, Optional
+
+logger = logging.getLogger(__name__)
 
 import httpx
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
@@ -41,16 +44,32 @@ async def execute_start(
     user_message: str,
     publish: PublishFn,
     check_abort: Optional[AbortCheckFn] = None,
+    tool_profile: str | None = None,
+    is_subtask_continuation: bool = False,
+    parent_session_dir: str | None = None,
 ) -> None:
-    """Execute a 'start' run: build agent, stream, handle interrupts, finalize.
-
-    Args:
-        publish: Async function(session_id, event_dict) for SSE events.
-        check_abort: Optional async function() -> bool, checked at boundaries.
-    """
-    agent = await build_agent(session_id, user_id, user_root, session_dir, agent_id, model_id)
+    """Execute a 'start' run: build agent, stream, handle interrupts, finalize."""
+    agent = await build_agent(
+        session_id, user_id, user_root, session_dir, agent_id, model_id,
+        tool_profile=tool_profile,
+        parent_session_dir=parent_session_dir,
+    )
     config = {"configurable": {"thread_id": session_id}}
-    initial_input = {"messages": [{"role": "user", "content": user_message}]}
+
+    if is_subtask_continuation:
+        # Subtask bridge: the subtask_result assistant message is already
+        # persisted to the DB. Inject the child result as a SystemMessage
+        # so the model sees it in context, but _persist_messages will skip
+        # it (SystemMessages are filtered out), preventing a duplicate
+        # "user" message from appearing in the chat.
+        initial_input = {"messages": [
+            SystemMessage(content=(
+                "[Subtask Result — do not treat as user input]\n\n"
+                + user_message
+            )),
+        ]}
+    else:
+        initial_input = {"messages": [{"role": "user", "content": user_message}]}
 
     await _execute_graph(
         agent, initial_input, config, session_id, session_dir, publish, check_abort,
@@ -138,15 +157,56 @@ async def _execute_graph(
     Phase L: Uses try/finally to ensure diagnostics are recorded even on
     error paths, so that failed runs still carry prompt continuity evidence.
     """
+    # Phase 6: reset per-run tool dedup counter
+    from tools.registry import reset_tool_call_counter
+    reset_tool_call_counter(session_id)
+
     # Phase L: write initial diagnostics early (prompt layer sizes only).
     # If the run fails before _finalize/_handle_interrupt, at least the
     # prompt diagnostics will be on the run record.
     await _record_run_diagnostics(agent, session_id, [])
 
+    # Phase P4-B: microcompact — trim old low-value results before model call.
+    # Best-effort: failure doesn't block the run.
+    mc_result = None
+    try:
+        from agent.microcompact import run_microcompact
+        # Read latest context ratio from agent metadata if available
+        ctx_ratio = getattr(agent, "_last_context_ratio", None)
+        mc_result = await run_microcompact(agent, config, session_id, ctx_ratio)
+        if mc_result.applied:
+            logger.info(
+                "[microcompact] session=%s removed=%d replaced=%d reason=%s",
+                session_id[:8], mc_result.removed_count, mc_result.replaced_count, mc_result.reason,
+            )
+    except Exception:
+        if settings.debug:
+            traceback.print_exc()
+
+    # Attach microcompact result to agent for diagnostics recording
+    if mc_result:
+        agent._microcompact_result = {
+            "applied": mc_result.applied,
+            "removed_count": mc_result.removed_count,
+            "replaced_count": mc_result.replaced_count,
+            "reason": mc_result.reason,
+        }
+
     aborted = await _stream_and_translate(
         agent, input_data, config, session_id, publish, check_abort,
     )
     if aborted:
+        # Phase P3: if aborted due to subtask_waiting, don't reset to idle —
+        # the session should stay in subtask_waiting until child completes.
+        if await _is_subtask_waiting(session_id):
+            # Persist messages accumulated so far, then exit cleanly
+            snapshot = await agent.aget_state(config)
+            if snapshot:
+                messages = snapshot.values.get("messages", [])
+                if messages:
+                    await _persist_messages(session_id, messages)
+            await publish(session_id, {"event": "done", "reason": "subtask_waiting"})
+            return
         await _update_db_status(session_id, "idle")
         await publish(session_id, {"event": "status_change", "status": "idle"})
         return
@@ -222,11 +282,37 @@ async def _stream_and_translate(
                     continue
 
                 if node_name == "model":
-                    # Tool calls from complete (aggregated) model output.
-                    # Text content is intentionally skipped here — already
-                    # streamed token-by-token via the "messages" channel.
+                    # Phase P4-A: reset per-turn result accumulator for the new model turn
+                    from tools.registry import reset_turn_accumulator
+                    reset_turn_accumulator(session_id)
+                    # Complete (aggregated) model output from "updates" channel.
+                    # When streaming=True, text was already sent token-by-token
+                    # via "messages". When streaming=False, no "messages" events
+                    # are emitted, so we must emit text_delta from here.
                     messages = node_data.get("messages", [])
                     for msg in messages:
+                        # Emit text content for non-streaming models
+                        # (AIMessage, not AIMessageChunk = non-streaming output)
+                        if (
+                            isinstance(msg, AIMessage)
+                            and not isinstance(msg, AIMessageChunk)
+                            and msg.content
+                        ):
+                            if current_message_id is None:
+                                current_message_id = str(uuid.uuid4())
+                            cleaned, reasoning_delta = think_filter.feed(msg.content)
+                            if reasoning_delta:
+                                await publish(session_id, {
+                                    "event": "reasoning_delta",
+                                    "message_id": current_message_id,
+                                    "content": reasoning_delta,
+                                })
+                            if cleaned:
+                                await publish(session_id, {
+                                    "event": "text_delta",
+                                    "message_id": current_message_id,
+                                    "content": cleaned,
+                                })
                         if hasattr(msg, "tool_calls") and msg.tool_calls:
                             for tc in msg.tool_calls:
                                 await publish(session_id, {
@@ -269,6 +355,11 @@ async def _stream_and_translate(
 
             # Phase L: check abort at node boundaries (after each updates batch)
             if check_abort and await check_abort():
+                return True
+
+            # Phase P3: if launch_subagent set parent to subtask_waiting,
+            # stop the current run immediately so we don't continue looping.
+            if await _is_subtask_waiting(session_id):
                 return True
 
     # Flush any remaining buffered text after the stream ends
@@ -457,6 +548,28 @@ async def _finalize(agent, config: dict, session_id: str, publish: PublishFn) ->
     # Phase L: record prompt diagnostics on the active run
     await _record_run_diagnostics(agent, session_id, messages)
 
+    # Phase P4-B: post-run microcompact — now the checkpoint has all messages
+    # from this run. Clean up old low-value results for the NEXT run.
+    try:
+        from agent.microcompact import run_microcompact
+        ctx_ratio = None
+        print(f"[microcompact/post-run] ENTERING for session={session_id[:8]} messages={len(messages)}")
+        mc_result = await run_microcompact(agent, config, session_id, ctx_ratio)
+        print(f"[microcompact/post-run] RESULT: applied={mc_result.applied} removed={mc_result.removed_count} replaced={mc_result.replaced_count} reason={mc_result.reason}")
+        # Update diagnostics with post-run microcompact
+        agent._microcompact_result = {
+            "applied": mc_result.applied,
+            "removed_count": mc_result.removed_count,
+            "replaced_count": mc_result.replaced_count,
+            "reason": mc_result.reason,
+        }
+        # Re-record diagnostics with updated microcompact info
+        await _record_run_diagnostics(agent, session_id, messages)
+        print(f"[microcompact/post-run] diagnostics re-recorded")
+    except Exception as e:
+        print(f"[microcompact/post-run] EXCEPTION: {type(e).__name__}: {e}")
+        traceback.print_exc()
+
     await _update_db_status(session_id, "idle", token_usage=token_usage)
 
     # Phase L: call-level context data for frontend "Prompt X / Y" display.
@@ -518,6 +631,26 @@ async def _finalize(agent, config: dict, session_id: str, publish: PublishFn) ->
 
     # Auto-generate title (best-effort, non-blocking)
     asyncio.create_task(_maybe_generate_title(session_id, messages, publish))
+
+    # Phase P4-C: update rolling session memory (best-effort, non-blocking)
+    _sd = getattr(agent, "_session_dir", None)
+    if _sd:
+        asyncio.create_task(_update_session_memory_async(_sd, messages, session_id))
+
+
+async def _update_session_memory_async(session_dir: str, messages: list, session_id: str) -> None:
+    """Phase P4-C: async wrapper for session memory update. Best-effort."""
+    try:
+        from agent.session_memory import should_update_memory, update_session_memory
+
+        last_seq = len(messages) - 1
+        if should_update_memory(session_dir, messages, last_seq):
+            updated = await update_session_memory(session_dir, messages, session_id)
+            if updated and settings.debug:
+                print(f"[session_memory] Updated for session {session_id[:8]}")
+    except Exception:
+        if settings.debug:
+            traceback.print_exc()
 
 
 async def _record_run_diagnostics(agent, session_id: str, messages: list) -> None:
@@ -601,6 +734,10 @@ async def _record_run_diagnostics(agent, session_id: str, messages: list) -> Non
                 if last_skill_load_idx >= 0 and first_plan_idx >= 0
                 else None
             ),
+            # Phase P4-B: microcompact observability
+            **_get_microcompact_diagnostics(agent),
+            # Phase P4-D: compaction mode
+            **_get_compaction_mode_diagnostics(getattr(agent, "_session_dir", None)),
         }
 
         async with AsyncSessionLocal() as db:
@@ -623,6 +760,102 @@ async def _record_run_diagnostics(agent, session_id: str, messages: list) -> Non
     except Exception:
         if settings.debug:
             traceback.print_exc()
+
+
+def _extract_knowledge_source_refs(messages: list) -> list[dict]:
+    """Phase P6-D: extract knowledge source references from tool results.
+
+    Scans ToolMessages from knowledge_search and knowledge_read,
+    extracts doc_id / title / kind / source_file / evidence_excerpt
+    to be attached as a source_refs part on the final assistant message.
+    """
+    import json as _json
+
+    sources: dict[str, dict] = {}  # keyed by doc_id for dedup
+
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        tool_name = getattr(msg, "name", "") or ""
+        if tool_name not in ("knowledge_search", "knowledge_read"):
+            continue
+
+        content = msg.content if isinstance(msg.content, str) else ""
+        try:
+            data = _json.loads(content)
+        except (ValueError, _json.JSONDecodeError):
+            continue
+
+        if tool_name == "knowledge_search":
+            for result in data.get("results", []):
+                doc_id = result.get("doc_id", "")
+                if doc_id and doc_id not in sources:
+                    excerpts = result.get("excerpts", [])
+                    evidence = excerpts[0]["text"] if excerpts else ""
+                    sources[doc_id] = {
+                        "doc_id": doc_id,
+                        "title": result.get("title", ""),
+                        "kind": result.get("kind", ""),
+                        "source_file": "",
+                        "evidence_excerpt": evidence[:300],
+                    }
+
+        elif tool_name == "knowledge_read":
+            doc_id = data.get("doc_id", "")
+            if doc_id:
+                content_text = data.get("content", "")
+                evidence = content_text[:300] if content_text else ""
+                entry = sources.get(doc_id, {
+                    "doc_id": doc_id,
+                    "title": data.get("title", ""),
+                    "kind": data.get("kind", ""),
+                    "source_file": data.get("source_file", ""),
+                    "evidence_excerpt": "",
+                })
+                # Update with richer data from read
+                if data.get("title"):
+                    entry["title"] = data["title"]
+                if data.get("source_file"):
+                    entry["source_file"] = data["source_file"]
+                if evidence and not entry.get("evidence_excerpt"):
+                    entry["evidence_excerpt"] = evidence
+                sources[doc_id] = entry
+
+    # Assign ref_index (1-based) for [1] [2] citation alignment
+    result = list(sources.values())
+    for i, src in enumerate(result):
+        src["ref_index"] = i + 1
+    return result
+
+
+def _get_compaction_mode_diagnostics(session_dir: str | None) -> dict:
+    """Extract compaction mode from session_memory_meta.json for diagnostics."""
+    if not session_dir:
+        return {"compaction_mode": "pre_hard_compact"}
+    try:
+        from agent.session_memory import read_meta
+        meta = read_meta(session_dir)
+        return {
+            "compaction_mode": "post_hard_compact" if meta.get("post_hard_compact") else "pre_hard_compact",
+            "memory_available": meta.get("memory_valid", False),
+            "memory_snapshot_version": meta.get("snapshot_version", 0),
+            "memory_token_estimate": meta.get("memory_token_estimate", 0),
+        }
+    except Exception:
+        return {"compaction_mode": "pre_hard_compact"}
+
+
+def _get_microcompact_diagnostics(agent) -> dict:
+    """Extract microcompact result from agent metadata for diagnostics."""
+    mc = getattr(agent, "_microcompact_result", None)
+    if not mc:
+        return {"microcompact_applied": False}
+    return {
+        "microcompact_applied": mc.get("applied", False),
+        "microcompact_removed_count": mc.get("removed_count", 0),
+        "microcompact_replaced_count": mc.get("replaced_count", 0),
+        "microcompact_reason": mc.get("reason", ""),
+    }
 
 
 # ── Helpers (moved from runner.py) ───────────────────────────────────────
@@ -766,7 +999,12 @@ async def _persist_messages(session_id: str, messages: list) -> None:
                         if isinstance(m, (AIMessage, ToolMessage))
                     ]
 
-            for msg in new_messages:
+            # Phase P6-D: collect knowledge source refs from ALL messages in this run
+            # (not just new_messages, because ToolMessages are often already persisted
+            # incrementally and won't appear in new_messages at finalize time)
+            knowledge_source_refs = _extract_knowledge_source_refs(messages)
+
+            for i, msg in enumerate(new_messages):
                 if isinstance(msg, AIMessage):
                     parts = []
                     if msg.content:
@@ -786,6 +1024,15 @@ async def _persist_messages(session_id: str, messages: list) -> None:
                                 "tool_name": tc["name"],
                                 "input": tc["args"],
                             })
+                    # Phase P6-D: attach source_refs to the LAST assistant message
+                    is_last_ai = not any(
+                        isinstance(m, AIMessage) for m in new_messages[i + 1:]
+                    )
+                    if is_last_ai and knowledge_source_refs:
+                        parts.append({
+                            "type": "source_refs",
+                            "sources": knowledge_source_refs,
+                        })
                     if parts:
                         await session_svc.create_message(
                             db, session_id=sid, role="assistant", parts=parts,
@@ -1082,6 +1329,21 @@ async def _maybe_generate_title(session_id: str, messages: list, publish: Publis
     except Exception:
         if settings.debug:
             traceback.print_exc()
+
+
+async def _is_subtask_waiting(session_id: str) -> bool:
+    """Check if this session is in subtask_waiting state (Phase P3).
+
+    Used by _stream_and_translate to halt the run after launch_subagent
+    sets the parent to subtask_waiting — prevents the agent from continuing
+    to call more tools while waiting for the child.
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            session = await session_svc.get_session(db, uuid.UUID(session_id))
+            return session is not None and session.status == "subtask_waiting"
+    except Exception:
+        return False
 
 
 async def _update_db_status(

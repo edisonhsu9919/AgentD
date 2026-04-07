@@ -9,7 +9,7 @@ import os
 from typing import Any
 
 from tools.base import BaseTool, ToolContext
-from workspace.manager import validate_path
+from workspace.manager import validate_path, validate_path_dual
 
 _MAX_RESULTS = 200
 
@@ -25,6 +25,20 @@ class GlobTool(BaseTool):
             "Find files matching a glob pattern in the workspace. "
             "Supports *, **, and ? wildcards. "
             "Returns a list of matching relative paths."
+        )
+
+    @property
+    def metadata(self) -> "ToolMetadata":
+        from tools.base import ToolMetadata
+        return ToolMetadata(
+            default_permission="allow",
+            is_read_only=True,
+            is_destructive=False,
+            is_concurrency_safe=True,
+            can_run_in_background=True,
+            result_compressibility="high",
+            access_scope="session_only",
+            mutates_session_state=False,
         )
 
     def schema(self) -> dict[str, Any]:
@@ -48,7 +62,7 @@ class GlobTool(BaseTool):
         path: str = kwargs.get("path") or "."
 
         try:
-            abs_path = validate_path(ctx.session_dir, path)
+            abs_path = validate_path_dual(ctx.session_dir, ctx.parent_session_dir, path)
         except PermissionError as e:
             return {"output": str(e), "is_error": True}
 
