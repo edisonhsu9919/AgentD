@@ -61,8 +61,8 @@ API_GUIDE.md
 # Claude Code local config
 .claude/
 
-# Local skill development
-skills/
+# Local skill development (root-level only, not agentd/skills/)
+/skills/
 
 # Design reference (local only)
 AgentD-Design-Reference/
