@@ -42,6 +42,7 @@ def _make_ctx(session_dir: str) -> ToolContext:
         session_id="test-session",
         user_root=os.path.dirname(os.path.dirname(session_dir)),
         session_dir=session_dir,
+        workspace_dir=session_dir,
         venv_bin="",
         publish=AsyncMock(),
     )
@@ -212,6 +213,50 @@ class TestLaunchSubagentMetadata:
         assert "allowed_tools" in schema["properties"]
         assert "task_packet" in schema["required"]
 
+    @pytest.mark.asyncio
+    async def test_child_runtime_defaults_to_fsd_and_persists_resolved_tools(self, user_root, session_dir):
+        from agent.child_session import read_child_session_meta
+        from permission.policy import load_policy
+        from tools.launch_subagent import LaunchSubagentTool
+
+        tool = LaunchSubagentTool()
+        ctx = _make_ctx(session_dir)
+        child_session_id = "8ec3905d-f15a-4ca6-b2c0-6f38abed4de6"
+        child_session_dir = get_session_dir(user_root, child_session_id)
+
+        db = AsyncMock()
+        db_ctx = AsyncMock()
+        db_ctx.__aenter__.return_value = db
+        db_ctx.__aexit__.return_value = False
+        run_id = MagicMock()
+        enqueue_start = AsyncMock(return_value=MagicMock(id=run_id))
+
+        with (
+            patch("core.database.AsyncSessionLocal", return_value=db_ctx),
+            patch("agent.scheduler.enqueue_start", new=enqueue_start),
+        ):
+            result = await tool._enqueue_child_run(
+                ctx,
+                child_session_id=child_session_id,
+                task_packet="do the thing",
+                requested_tools=["file_write", "bash", "file_write", ""],
+                resolved_tools=["bash", "file_write"],
+                model_id="test-model",
+            )
+
+        assert result is run_id
+        policy = load_policy(child_session_dir)
+        assert policy.mode == "fsd"
+        meta = read_child_session_meta(child_session_dir)
+        assert meta["parent_session_id"] == ctx.session_id
+        assert meta["parent_session_dir"] == ctx.session_dir
+        assert meta["allowed_tools"] == ["file_write", "bash"]
+        assert meta["resolved_tools"] == ["bash", "file_write"]
+
+        payload = enqueue_start.await_args.kwargs["payload"]
+        assert payload["tool_profile"] == "child"
+        assert payload["allowed_tools"] == ["bash", "file_write"]
+
 
 # ── Registry tool count and profiles ─────────────────────────────────────
 
@@ -247,17 +292,18 @@ class TestRegistryP3:
         assert "glob" in child_names
         assert "grep" in child_names
 
-    def test_child_profile_default_excludes_write_tools(self):
+    def test_child_profile_default_inherits_execution_tools(self):
         registry = get_registry()
         ctx = _make_ctx("/tmp/fake")
         child_tools = registry.get_langchain_tools(ctx, tool_profile="child")
         child_names = {t.name for t in child_tools}
 
-        assert "file_write" not in child_names
-        assert "file_edit" not in child_names
-        assert "bash" not in child_names
+        assert "file_write" in child_names
+        assert "file_edit" in child_names
+        assert "bash" in child_names
+        assert "skill" in child_names
 
-    def test_child_profile_with_allowed_tools(self):
+    def test_child_profile_with_allowed_tools_narrows_to_subset(self):
         registry = get_registry()
         ctx = _make_ctx("/tmp/fake")
         child_tools = registry.get_langchain_tools(
@@ -268,8 +314,37 @@ class TestRegistryP3:
 
         assert "file_write" in child_names
         assert "bash" in child_names
+        assert "file_read" not in child_names
         # Still can't spawn
         assert "launch_subagent" not in child_names
+
+    def test_launch_subagent_default_resolves_parent_like_toolset(self):
+        from tools.launch_subagent import LaunchSubagentTool
+
+        tool = LaunchSubagentTool()
+        resolved = set(tool._resolve_child_tools(None))
+
+        assert "bash" in resolved
+        assert "file_write" in resolved
+        assert "file_edit" in resolved
+        assert "launch_subagent" not in resolved
+        assert "launch_detached_process" not in resolved
+
+    @pytest.mark.asyncio
+    async def test_launch_subagent_rejects_empty_narrowing(self, session_dir):
+        from tools.launch_subagent import LaunchSubagentTool
+
+        tool = LaunchSubagentTool()
+        result = await tool.execute(
+            _make_ctx(session_dir),
+            title="Too narrow",
+            task_packet="do work",
+            allowed_tools=["launch_subagent"],
+        )
+
+        assert result["is_error"] is True
+        payload = json.loads(result["output"])
+        assert payload["status"] == "rejected"
 
     def test_full_profile(self):
         registry = get_registry()
@@ -338,7 +413,7 @@ class TestORMFKResolution:
 class TestMigration014:
     def test_expected_schema_version(self):
         from main import EXPECTED_SCHEMA_VERSION
-        assert EXPECTED_SCHEMA_VERSION == "014"
+        assert EXPECTED_SCHEMA_VERSION == "015"
 
     def test_migration_file_exists(self):
         from pathlib import Path

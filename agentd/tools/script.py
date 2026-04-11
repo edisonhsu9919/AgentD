@@ -4,8 +4,8 @@ import shutil
 import tempfile
 from typing import Any
 
+from agent.runtime_env import resolve_script_execution
 from tools.base import BaseTool, ToolContext
-from skills.env import resolve_env_for_script
 
 _TIMEOUT = 60  # seconds
 _MAX_OUTPUT = 8000  # characters
@@ -74,22 +74,13 @@ class ScriptTool(BaseTool):
             with open(script_path, "w", encoding="utf-8") as f:
                 f.write(content)
 
-            # Execute with per-call env resolution (Phase M4-D)
-            # M4-C materializes skill scripts as scripts/<name>, so try
-            # that prefix first; bare basename as fallback.
-            effective_bin = resolve_env_for_script(
-                ctx.session_dir, f"scripts/{basename}", ctx.venv_bin,
-            )
-            if effective_bin == ctx.venv_bin:
-                effective_bin = resolve_env_for_script(
-                    ctx.session_dir, basename, ctx.venv_bin,
-                )
-            python_bin = os.path.join(effective_bin, "python")
+            execution = resolve_script_execution(ctx, basename)
             proc = await asyncio.create_subprocess_exec(
-                python_bin, script_path,
+                execution.python_bin, script_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                cwd=ctx.session_dir,
+                cwd=execution.workdir,
+                env=execution.build_process_env(),
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_TIMEOUT)
             output = stdout.decode(errors="replace")

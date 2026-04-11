@@ -58,6 +58,7 @@ def ctx(session_dir, user_venv_bin):
         session_id="s1",
         user_root=str(os.path.dirname(session_dir)),
         session_dir=session_dir,
+        workspace_dir=session_dir,
         venv_bin=user_venv_bin,
         publish=lambda *a, **kw: None,
     )
@@ -93,10 +94,12 @@ class TestBashToolPerCallEnv:
 
             await tool.execute(ctx, command=command)
 
-            # Verify the shell command includes skill env PATH
             called_cmd = mock_proc.call_args[0][0]
-            assert skill_env_bin in called_cmd
-            assert user_venv_bin not in called_cmd
+            called_env = mock_proc.call_args.kwargs["env"]
+            assert called_cmd == command
+            assert called_env["PATH"].startswith(skill_env_bin)
+            assert user_venv_bin not in called_env["PATH"]
+            assert called_env["AGENTD_ENV_KIND"] == "skill"
 
     @pytest.mark.asyncio
     async def test_user_env_when_no_match(
@@ -116,9 +119,10 @@ class TestBashToolPerCallEnv:
 
             await tool.execute(ctx, command=command)
 
-            called_cmd = mock_proc.call_args[0][0]
-            assert user_venv_bin in called_cmd
-            assert skill_env_bin not in called_cmd
+            called_env = mock_proc.call_args.kwargs["env"]
+            assert called_env["PATH"].startswith(user_venv_bin)
+            assert skill_env_bin not in called_env["PATH"]
+            assert called_env["AGENTD_ENV_KIND"] == "user"
 
     @pytest.mark.asyncio
     async def test_user_env_when_no_mapping_file(
@@ -136,8 +140,8 @@ class TestBashToolPerCallEnv:
 
             await tool.execute(ctx, command=command)
 
-            called_cmd = mock_proc.call_args[0][0]
-            assert user_venv_bin in called_cmd
+            called_env = mock_proc.call_args.kwargs["env"]
+            assert called_env["PATH"].startswith(user_venv_bin)
 
     @pytest.mark.asyncio
     async def test_multi_skill_correct_resolution(
@@ -162,18 +166,18 @@ class TestBashToolPerCallEnv:
 
             # Command 1: pdf skill
             await tool.execute(ctx, command="python scripts/split.py plan.json")
-            called1 = mock_proc.call_args[0][0]
-            assert env1 in called1
+            called1 = mock_proc.call_args.kwargs["env"]["PATH"]
+            assert called1.startswith(env1)
 
             # Command 2: ocr skill
             await tool.execute(ctx, command="python scripts/scan.py img.png")
-            called2 = mock_proc.call_args[0][0]
-            assert env2 in called2
+            called2 = mock_proc.call_args.kwargs["env"]["PATH"]
+            assert called2.startswith(env2)
 
             # Command 3: unrelated
             await tool.execute(ctx, command="echo hello")
-            called3 = mock_proc.call_args[0][0]
-            assert user_venv_bin in called3
+            called3 = mock_proc.call_args.kwargs["env"]["PATH"]
+            assert called3.startswith(user_venv_bin)
 
 
 # ── Test: ScriptTool per-call env ────────────────────────────────────────────

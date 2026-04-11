@@ -23,6 +23,12 @@ interface TaskOutputPanelProps {
   sessionId: string;
 }
 
+/** Polling interval (ms) for live task state + stdout refresh */
+const TASK_POLL_INTERVAL = 2000;
+
+/** Task status values that indicate ongoing work worth polling for */
+const ACTIVE_STATUSES = new Set(["queued", "running", "waiting"]);
+
 export default function TaskOutputPanel({ sessionId }: TaskOutputPanelProps) {
   const taskList = usePanelStore((s) => s.taskList);
   const activeTaskId = usePanelStore((s) => s.activeTaskId);
@@ -41,6 +47,38 @@ export default function TaskOutputPanel({ sessionId }: TaskOutputPanelProps) {
       fetchTaskStdout(sessionId, activeTaskId);
     }
   }, [activeTaskId, sessionId, fetchTaskStdout]);
+
+  // F1 + F2: Poll task list + active stdout as SSE fallback.
+  // Polling stops once all tasks are settled (completed/failed/cancelled),
+  // ensuring both live log refresh and final-state reconcile.
+  const hasActiveTask = taskList.some((t) => ACTIVE_STATUSES.has(t.status));
+  // Track whether we just transitioned from active → all settled, so we
+  // can do one final reconcile pull to make sure UI matches API truth.
+  const wasActiveRef = useRef(false);
+
+  useEffect(() => {
+    if (!hasActiveTask) {
+      // One final reconcile after the last task settled
+      if (wasActiveRef.current) {
+        wasActiveRef.current = false;
+        fetchTasks(sessionId);
+        if (activeTaskId) {
+          fetchTaskStdout(sessionId, activeTaskId);
+        }
+      }
+      return;
+    }
+
+    wasActiveRef.current = true;
+    const interval = setInterval(() => {
+      fetchTasks(sessionId);
+      if (activeTaskId) {
+        fetchTaskStdout(sessionId, activeTaskId);
+      }
+    }, TASK_POLL_INTERVAL);
+
+    return () => clearInterval(interval);
+  }, [hasActiveTask, sessionId, activeTaskId, fetchTasks, fetchTaskStdout]);
 
   const activeTask = taskList.find((t) => t.task_id === activeTaskId);
 

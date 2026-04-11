@@ -26,6 +26,7 @@ def _make_ctx(session_dir: str) -> ToolContext:
         session_id="test-session",
         user_root=session_dir,
         session_dir=session_dir,
+        workspace_dir=session_dir,
         venv_bin="",
         publish=AsyncMock(),
     )

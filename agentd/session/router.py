@@ -172,6 +172,7 @@ async def get_runtime(
     ctx_completion = 0
     ctx_window = None
     ctx_ratio = None
+    last_error = None
     try:
         from agent.run_models import AgentRun
         from sqlalchemy import select as sa_select
@@ -190,6 +191,17 @@ async def get_runtime(
             ctx_completion = diag.get("last_call_completion_tokens", 0)
             ctx_window = diag.get("context_window_limit")
             ctx_ratio = diag.get("context_usage_ratio")
+
+        err_stmt = (
+            sa_select(AgentRun)
+            .where(AgentRun.session_id == session_id)
+            .where(AgentRun.error.isnot(None))
+            .order_by(AgentRun.updated_at.desc())
+            .limit(1)
+        )
+        last_error_run = (await db.execute(err_stmt)).scalar_one_or_none()
+        if last_error_run and last_error_run.error:
+            last_error = last_error_run.error
     except Exception:
         pass  # Graceful fallback — no diagnostics available yet
 
@@ -241,7 +253,7 @@ async def get_runtime(
         last_message_seq=last_seq,
         pending_permissions_count=pending_count,
         resumable=resumable,
-        last_error=None,  # Phase A: to be enhanced later
+        last_error=last_error,
         updated_at=session.updated_at,
         last_call_prompt_tokens=ctx_prompt,
         last_call_completion_tokens=ctx_completion,
@@ -546,7 +558,7 @@ async def abort_session(
     Phase C: Enqueues an abort run + cancels any queued (unclaimed) runs.
     The owning worker detects the abort at its next boundary check.
     """
-    from agent.scheduler import cancel_queued_runs, enqueue_abort
+    from agent.scheduler import cancel_queued_runs, enqueue_abort, request_interrupt
 
     session = await session_svc.get_session(db, session_id)
     if not session or session.user_id != current_user.id:
@@ -571,6 +583,9 @@ async def abort_session(
         return ok({"aborted": True})
 
     # For running/waiting sessions, enqueue an abort signal for the worker
+    # Phase 7A: also set session-level interrupt flag so the running worker
+    # sees the abort at its next tool boundary (cross-worker safe)
+    await request_interrupt(db, session_id)
     await enqueue_abort(db, session_id)
     await db.commit()
 
@@ -597,7 +612,7 @@ async def cancel_task(
     - running: enqueue abort for the worker
     - idle/error: no-op for abort, still clears plan
     """
-    from agent.scheduler import cancel_queued_runs, enqueue_abort
+    from agent.scheduler import cancel_queued_runs, enqueue_abort, request_interrupt
     from core.events import event_bus
     from workspace.manager import get_session_dir
 
@@ -625,7 +640,8 @@ async def cancel_task(
                 "event": "status_change", "status": "idle",
             })
         else:
-            # Running: enqueue abort for the worker to pick up
+            # Running: set interrupt flag + enqueue abort for the worker
+            await request_interrupt(db, session_id)
             await enqueue_abort(db, session_id)
 
         result["aborted"] = True
@@ -855,7 +871,7 @@ async def get_task_stdout(
 ):
     """Get the last N lines of a task's stdout log."""
     from agent.task_models import SessionTask
-    from agent.tasks import read_task_stdout
+    from agent.tasks import read_task_stdout, read_task_stderr
     from workspace.manager import get_session_dir
     import session.models  # noqa: F401
 
@@ -874,9 +890,22 @@ async def get_task_stdout(
         )
 
     session_dir = get_session_dir(current_user.workspace, str(session_id))
-    output = read_task_stdout(session_dir, str(task_id), tail_lines=tail)
+    out_stdout = read_task_stdout(session_dir, str(task_id), tail_lines=tail).strip()
+    out_stderr = read_task_stderr(session_dir, str(task_id), tail_lines=tail).strip()
+    
+    # Merge them. stderr usually contains progress, stdout contains final json.
+    parts = []
+    if out_stderr:
+        parts.append(out_stderr)
+    if out_stdout:
+        parts.append(out_stdout)
+        
+    combined = "\n".join(parts)
+    lines = combined.split("\n") if combined else []
+    if len(lines) > tail:
+        combined = "\n".join(lines[-tail:])
 
-    return ok({"task_id": str(task_id), "lines": tail, "stdout": output})
+    return ok({"task_id": str(task_id), "lines": tail, "stdout": combined})
 
 
 @router.post("/{session_id}/tasks/{task_id}/stop")

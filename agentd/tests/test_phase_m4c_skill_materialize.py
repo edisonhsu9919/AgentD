@@ -54,6 +54,7 @@ def ctx(user_root, session_dir):
         session_id="s1",
         user_root=user_root,
         session_dir=session_dir,
+        workspace_dir=session_dir,
         venv_bin="/tmp/venv/bin",
         publish=lambda *a, **kw: None,
     )

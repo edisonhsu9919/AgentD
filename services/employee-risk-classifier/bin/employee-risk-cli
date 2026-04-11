@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+#
+# employee-risk-cli: 稳定的后台/AgentD调用入口 (Phase 7B)
+#
+
+# 获取当前脚本所在目录
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+SERVICE_DIR="$(dirname "$DIR")"
+
+# 隔离的工作环境: 不受前台 AgentD 环境变量污染
+VENV_PYTHON="$SERVICE_DIR/.venv/bin/python"
+
+if [ ! -f "$VENV_PYTHON" ]; then
+    echo "Error: Virtual environment not found at $VENV_PYTHON." >&2
+    echo "Please create the service .venv first." >&2
+    exit 1
+fi
+
+export PYTHONPATH="$SERVICE_DIR"
+cd "$SERVICE_DIR"
+
+# 直接用本 service 的 Python 执行纯 JSON 的 python CLI
+exec "$VENV_PYTHON" "$SERVICE_DIR/cli.py" "$@"

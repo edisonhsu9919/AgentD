@@ -281,6 +281,40 @@ class TestFsdHitlIntegration:
         assert set(middleware.interrupt_on.keys()) == set(_HITL_INTERRUPT_ON.keys())
 
 
+class TestProviderMessageSanitizer:
+    def test_known_nonleading_subtask_system_message_converts_to_ai(self):
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from agent.runtime import _sanitize_nonleading_system_messages
+
+        messages = [
+            HumanMessage(content="user asks"),
+            SystemMessage(content="[Sub-task completed]\n\nChild summary here"),
+        ]
+
+        sanitized, converted = _sanitize_nonleading_system_messages(messages)
+
+        assert converted == 1
+        assert len(sanitized) == 2
+        assert sanitized[0].type == "human"
+        assert sanitized[1].type == "ai"
+        assert sanitized[1].content.startswith("[Sub-task completed]")
+
+    def test_unknown_nonleading_system_message_is_dropped(self):
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from agent.runtime import _sanitize_nonleading_system_messages
+
+        messages = [
+            HumanMessage(content="user asks"),
+            SystemMessage(content="unexpected hidden instruction"),
+        ]
+
+        sanitized, converted = _sanitize_nonleading_system_messages(messages)
+
+        assert converted == 1
+        assert len(sanitized) == 1
+        assert sanitized[0].type == "human"
+
+
 # ── Integration tests: GET/PATCH /api/sessions/{id}/policy ──────────────────
 
 

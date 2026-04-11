@@ -11,7 +11,8 @@ class ToolContext:
     session_dir: str     # /workspaces/{user_id}/sessions/{session_id}/ (session cwd)
     venv_bin: str        # /workspaces/{user_id}/.venv/bin/
     publish: Callable    # EventBus.publish(session_id, event)
-    parent_session_dir: str | None = None  # Phase 6: child agent can read parent files
+    workspace_dir: str   # Phase 7C: The effective boundary for file operations.
+    run_id: str = ""     # Phase 7E: optional current run identifier for run-local guards.
 
 
 

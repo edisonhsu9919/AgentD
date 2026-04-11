@@ -1,0 +1,1244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能职业分类系统 v2.0 - 功能展示</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 50%, #7e22ce 100%);
+            color: #333;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            text-align: center;
+            padding: 60px 20px;
+            color: white;
+        }
+
+        header h1 {
+            font-size: 3.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+            animation: fadeInDown 1s ease;
+        }
+
+        header .subtitle {
+            font-size: 1.3em;
+            opacity: 0.9;
+            animation: fadeInUp 1s ease 0.3s both;
+        }
+
+        header .version-badge {
+            display: inline-block;
+            background: rgba(255, 255, 255, 0.2);
+            padding: 8px 20px;
+            border-radius: 20px;
+            margin-top: 15px;
+            backdrop-filter: blur(10px);
+            animation: fadeIn 1s ease 0.6s both;
+        }
+
+        @keyframes fadeInDown {
+            from {
+                opacity: 0;
+                transform: translateY(-30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        .main-content {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            margin-top: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            animation: slideUp 0.8s ease;
+        }
+
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(50px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .section {
+            margin-bottom: 50px;
+        }
+
+        .section h2 {
+            color: #1e3c72;
+            font-size: 2em;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 3px solid #7e22ce;
+            position: relative;
+        }
+
+        .section h2::before {
+            content: '';
+            position: absolute;
+            bottom: -3px;
+            left: 0;
+            width: 80px;
+            height: 3px;
+            background: #1e3c72;
+        }
+
+        .section h3 {
+            color: #7e22ce;
+            font-size: 1.5em;
+            margin: 30px 0 15px 0;
+        }
+
+        .pipeline {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            margin: 30px 0;
+            gap: 20px;
+        }
+
+        .pipeline-step {
+            flex: 1;
+            min-width: 220px;
+            background: linear-gradient(135deg, #1e3c72 0%, #7e22ce 100%);
+            color: white;
+            padding: 30px 20px;
+            border-radius: 15px;
+            text-align: center;
+            position: relative;
+            box-shadow: 0 5px 15px rgba(30, 60, 114, 0.3);
+            transition: all 0.3s ease;
+        }
+
+        .pipeline-step:hover {
+            transform: translateY(-8px) scale(1.02);
+            box-shadow: 0 10px 30px rgba(126, 34, 206, 0.4);
+        }
+
+        .pipeline-step .step-number {
+            font-size: 2.5em;
+            font-weight: bold;
+            opacity: 0.3;
+            position: absolute;
+            top: 10px;
+            right: 15px;
+        }
+
+        .pipeline-step .step-title {
+            font-size: 1.2em;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+
+        .pipeline-step .step-desc {
+            font-size: 0.9em;
+            opacity: 0.9;
+        }
+
+        .arrow {
+            font-size: 2em;
+            color: #7e22ce;
+            font-weight: bold;
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 25px;
+            margin: 30px 0;
+        }
+
+        .feature-card {
+            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+            padding: 30px;
+            border-radius: 15px;
+            border-left: 5px solid #7e22ce;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .feature-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: 100px;
+            height: 100px;
+            background: radial-gradient(circle, rgba(126, 34, 206, 0.1) 0%, transparent 70%);
+            transition: all 0.3s ease;
+        }
+
+        .feature-card:hover {
+            transform: translateX(8px) scale(1.02);
+            box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+        }
+
+        .feature-card:hover::before {
+            width: 150px;
+            height: 150px;
+        }
+
+        .feature-card .icon {
+            font-size: 2.5em;
+            margin-bottom: 15px;
+        }
+
+        .feature-card h4 {
+            color: #1e3c72;
+            margin-bottom: 12px;
+            font-size: 1.3em;
+        }
+
+        .code-block {
+            background: #2d3748;
+            color: #e2e8f0;
+            padding: 25px;
+            border-radius: 12px;
+            overflow-x: auto;
+            margin: 20px 0;
+            font-family: 'SF Mono', 'Monaco', 'Courier New', monospace;
+            font-size: 0.9em;
+            line-height: 1.6;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.2);
+            position: relative;
+        }
+
+        .code-block::before {
+            content: '⌘';
+            position: absolute;
+            top: 10px;
+            right: 15px;
+            opacity: 0.3;
+            font-size: 1.5em;
+        }
+
+        .code-block .comment {
+            color: #68d391;
+        }
+
+        .code-block .keyword {
+            color: #f687b3;
+        }
+
+        .code-block .string {
+            color: #fbbf24;
+        }
+
+        .tech-stack {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin: 25px 0;
+        }
+
+        .tech-badge {
+            background: linear-gradient(135deg, #1e3c72 0%, #7e22ce 100%);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 25px;
+            font-weight: bold;
+            box-shadow: 0 4px 15px rgba(126, 34, 206, 0.3);
+            transition: all 0.3s ease;
+            cursor: default;
+        }
+
+        .tech-badge:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 6px 20px rgba(126, 34, 206, 0.5);
+        }
+
+        .architecture {
+            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+            padding: 35px;
+            border-radius: 15px;
+            margin: 30px 0;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.05);
+        }
+
+        .module {
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            margin: 15px 0;
+            border-left: 5px solid #1e3c72;
+            transition: all 0.3s ease;
+        }
+
+        .module:hover {
+            border-left-width: 8px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+
+        .module h4 {
+            color: #1e3c72;
+            margin-bottom: 15px;
+            font-size: 1.2em;
+        }
+
+        .module ul {
+            margin-left: 25px;
+        }
+
+        .module li {
+            margin: 10px 0;
+            line-height: 1.6;
+        }
+
+        .demo-buttons {
+            display: flex;
+            gap: 20px;
+            margin: 35px 0;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 15px 35px;
+            border-radius: 30px;
+            font-size: 1.1em;
+            font-weight: bold;
+            text-decoration: none;
+            transition: all 0.3s ease;
+            display: inline-block;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+            cursor: pointer;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #1e3c72 0%, #7e22ce 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 8px 25px rgba(126, 34, 206, 0.4);
+        }
+
+        .btn-secondary {
+            background: white;
+            color: #1e3c72;
+            border: 2px solid #1e3c72;
+        }
+
+        .btn-secondary:hover {
+            background: #1e3c72;
+            color: white;
+        }
+
+        .btn-success {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+        }
+
+        .btn-success:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 8px 25px rgba(16, 185, 129, 0.4);
+        }
+
+        .highlight {
+            background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
+            padding: 3px 10px;
+            border-radius: 6px;
+            font-weight: bold;
+            color: #1a202c;
+        }
+
+        .config-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 25px 0;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .config-table th,
+        .config-table td {
+            padding: 15px;
+            text-align: left;
+        }
+
+        .config-table th {
+            background: linear-gradient(135deg, #1e3c72 0%, #7e22ce 100%);
+            color: white;
+            font-weight: bold;
+        }
+
+        .config-table tr:nth-child(even) {
+            background: #f8f9fa;
+        }
+
+        .config-table tr:hover {
+            background: #e9ecef;
+        }
+
+        .classification-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin: 25px 0;
+        }
+
+        .classification-card {
+            background: white;
+            border: 2px solid #e9ecef;
+            border-radius: 12px;
+            padding: 25px;
+            transition: all 0.3s ease;
+        }
+
+        .classification-card:hover {
+            border-color: #7e22ce;
+            box-shadow: 0 5px 20px rgba(126, 34, 206, 0.2);
+        }
+
+        .classification-card .title {
+            font-size: 1.3em;
+            font-weight: bold;
+            color: #1e3c72;
+            margin-bottom: 15px;
+        }
+
+        .classification-card .type-code {
+            display: inline-block;
+            background: #7e22ce;
+            color: white;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            margin-bottom: 15px;
+        }
+
+        .risk-levels {
+            list-style: none;
+            padding: 0;
+        }
+
+        .risk-levels li {
+            padding: 10px 15px;
+            margin: 8px 0;
+            border-radius: 8px;
+            background: #f8f9fa;
+            border-left: 4px solid;
+        }
+
+        .risk-levels li.level-1 { border-left-color: #10b981; }
+        .risk-levels li.level-2 { border-left-color: #3b82f6; }
+        .risk-levels li.level-3 { border-left-color: #fbbf24; }
+        .risk-levels li.level-4 { border-left-color: #f97316; }
+        .risk-levels li.level-5 { border-left-color: #ef4444; }
+        .risk-levels li.level-6 { border-left-color: #7f1d1d; }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin: 30px 0;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, #1e3c72 0%, #7e22ce 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 15px;
+            text-align: center;
+            box-shadow: 0 5px 20px rgba(126, 34, 206, 0.3);
+            transition: all 0.3s ease;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(126, 34, 206, 0.5);
+        }
+
+        .stat-card .number {
+            font-size: 3em;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+
+        .stat-card .label {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        footer {
+            text-align: center;
+            padding: 40px 20px;
+            color: white;
+            margin-top: 40px;
+        }
+
+        footer a {
+            color: white;
+            text-decoration: none;
+            border-bottom: 1px solid rgba(255,255,255,0.5);
+        }
+
+        footer a:hover {
+            border-bottom-color: white;
+        }
+
+        @media (max-width: 768px) {
+            header h1 {
+                font-size: 2.2em;
+            }
+
+            .pipeline {
+                flex-direction: column;
+            }
+
+            .arrow {
+                transform: rotate(90deg);
+            }
+
+            .demo-buttons {
+                flex-direction: column;
+            }
+
+            .btn {
+                width: 100%;
+                text-align: center;
+            }
+
+            .main-content {
+                padding: 25px;
+            }
+        }
+
+        code {
+            background: #f1f5f9;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'SF Mono', 'Monaco', 'Courier New', monospace;
+            color: #7e22ce;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 智能职业分类系统</h1>
+            <p class="subtitle">基于 AI 的多功能职业分类与风险评估平台</p>
+            <div class="version-badge">Version 2.0 - 模块化架构 | 多任务支持</div>
+        </header>
+
+        <div class="main-content">
+            <!-- 项目概述 -->
+            <section class="section">
+                <h2>📋 项目概述</h2>
+                <p>智能职业分类系统是一个基于<span class="highlight">大语言模型(LLM)</span>的多功能职业分析平台，采用模块化微服务架构设计。系统支持职业风险评估、行业分类、技能分析等多种分类任务，提供RESTful API和命令行界面，兼容多种LLM提供商（本地vLLM、OpenAI、通义千问等）。</p>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="number">3+</div>
+                        <div class="label">分类任务类型</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="number">4+</div>
+                        <div class="label">LLM 提供商</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="number">10+</div>
+                        <div class="label">API 接口</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="number">100%</div>
+                        <div class="label">异步处理</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 核心处理流程 -->
+            <section class="section">
+                <h2>🔄 智能分类处理流程</h2>
+                <div class="pipeline">
+                    <div class="pipeline-step">
+                        <div class="step-number">1</div>
+                        <div class="step-title">📥 数据输入</div>
+                        <div class="step-desc">支持单条/批量/文件上传</div>
+                    </div>
+                    <div class="arrow">→</div>
+                    <div class="pipeline-step">
+                        <div class="step-number">2</div>
+                        <div class="step-title">🎯 任务路由</div>
+                        <div class="step-desc">选择分类任务和模板</div>
+                    </div>
+                    <div class="arrow">→</div>
+                    <div class="pipeline-step">
+                        <div class="step-number">3</div>
+                        <div class="step-title">🤖 LLM 分析</div>
+                        <div class="step-desc">调用大模型智能分类</div>
+                    </div>
+                    <div class="arrow">→</div>
+                    <div class="pipeline-step">
+                        <div class="step-number">4</div>
+                        <div class="step-title">📊 结果输出</div>
+                        <div class="step-desc">返回分类结果和理由</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 核心功能特性 -->
+            <section class="section">
+                <h2>✨ 核心功能特性</h2>
+                <div class="features">
+                    <div class="feature-card">
+                        <div class="icon">🎯</div>
+                        <h4>多任务支持</h4>
+                        <p>职业风险评估、行业分类、技能分析，支持自定义分类模板</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">🔌</div>
+                        <h4>多 LLM 提供商</h4>
+                        <p>支持本地 vLLM、OpenAI、通义千问及自定义 API，运行时切换</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">🌐</div>
+                        <h4>RESTful API</h4>
+                        <p>完整的 FastAPI 接口，自动生成交互式文档</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">⚡</div>
+                        <h4>异步批处理</h4>
+                        <p>可配置并发数，支持大规模数据批量处理</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">📝</div>
+                        <h4>提示词管理</h4>
+                        <p>模板化提示词系统，动态创建和管理分类任务</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">📤</div>
+                        <h4>文件处理</h4>
+                        <p>支持 Excel/CSV 上传，后台异步处理，实时进度追踪</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">🛠️</div>
+                        <h4>命令行工具</h4>
+                        <p>便捷的 CLI 接口，支持单条分类、批量处理、配置管理</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">🔄</div>
+                        <h4>错误恢复</h4>
+                        <p>单项失败不影响批处理，详细的错误信息和重试机制</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 分类任务详情 -->
+            <section class="section">
+                <h2>📊 支持的分类任务</h2>
+
+                <div class="classification-grid">
+                    <div class="classification-card">
+                        <div class="title">🛡️ 职业风险评估</div>
+                        <div class="type-code">risk_assessment</div>
+                        <p style="margin-bottom: 15px;">基于作业环境和工作内容的 6 级风险分类体系</p>
+                        <ul class="risk-levels">
+                            <li class="level-1"><strong>1类</strong> - 极低风险：办公室岗位</li>
+                            <li class="level-2"><strong>2类</strong> - 低风险：辅助性岗位</li>
+                            <li class="level-3"><strong>3类</strong> - 中等风险：农业自然作业</li>
+                            <li class="level-4"><strong>4类</strong> - 中高风险：工厂基础危险</li>
+                            <li class="level-5"><strong>5类</strong> - 高风险：有毒有害化工</li>
+                            <li class="level-6"><strong>6类</strong> - 极高风险：矿井爆破高空</li>
+                        </ul>
+                    </div>
+
+                    <div class="classification-card">
+                        <div class="title">🏭 行业分类</div>
+                        <div class="type-code">industry_classification</div>
+                        <p style="margin-bottom: 15px;">基于国民经济行业分类标准的 20 类行业归类（GB/T 4754-2017）</p>
+                        <ul style="margin-left: 20px;">
+                            <li><strong>A类</strong> - 农、林、牧、渔业</li>
+                            <li><strong>B类</strong> - 采矿业</li>
+                            <li><strong>C类</strong> - 制造业</li>
+                            <li><strong>D类</strong> - 电力、热力、燃气及水生产</li>
+                            <li><strong>E类</strong> - 建筑业</li>
+                            <li>... 共 20 个行业类别</li>
+                        </ul>
+                    </div>
+
+                    <div class="classification-card">
+                        <div class="title">🎓 技能分析</div>
+                        <div class="type-code">skill_analysis</div>
+                        <p style="margin-bottom: 15px;">基于工作复杂度和技能要求的 5 级技能分析</p>
+                        <ul style="margin-left: 20px;">
+                            <li><strong>初级</strong> - 基础技能要求，简单重复性工作</li>
+                            <li><strong>中级</strong> - 专业技能要求，独立完成任务</li>
+                            <li><strong>高级</strong> - 高级专业技能，复杂问题解决</li>
+                            <li><strong>专家级</strong> - 领域专家技能，创新与研发</li>
+                            <li><strong>管理级</strong> - 管理和领导技能，战略规划</li>
+                        </ul>
+                    </div>
+
+                    <div class="classification-card">
+                        <div class="title">🎨 自定义任务</div>
+                        <div class="type-code">custom</div>
+                        <p style="margin-bottom: 15px;">支持用户自定义分类任务和模板</p>
+                        <ul style="margin-left: 20px;">
+                            <li>自定义分类等级和描述</li>
+                            <li>灵活的提示词模板</li>
+                            <li>通过 API 动态创建</li>
+                            <li>支持复杂业务规则</li>
+                            <li>可保存和复用模板</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 技术栈 -->
+            <section class="section">
+                <h2>🛠️ 技术栈</h2>
+
+                <h3>后端框架与核心库</h3>
+                <div class="tech-stack">
+                    <span class="tech-badge">Python 3.8+</span>
+                    <span class="tech-badge">FastAPI</span>
+                    <span class="tech-badge">Pydantic</span>
+                    <span class="tech-badge">Uvicorn</span>
+                    <span class="tech-badge">asyncio</span>
+                </div>
+
+                <h3>LLM 集成</h3>
+                <div class="tech-stack">
+                    <span class="tech-badge">vLLM (本地部署)</span>
+                    <span class="tech-badge">OpenAI API</span>
+                    <span class="tech-badge">通义千问 Qwen</span>
+                    <span class="tech-badge">兼容 OpenAI 格式</span>
+                </div>
+
+                <h3>数据处理</h3>
+                <div class="tech-stack">
+                    <span class="tech-badge">pandas</span>
+                    <span class="tech-badge">openpyxl</span>
+                    <span class="tech-badge">python-dotenv</span>
+                </div>
+
+                <h3>开发工具</h3>
+                <div class="tech-stack">
+                    <span class="tech-badge">Git</span>
+                    <span class="tech-badge">pytest</span>
+                    <span class="tech-badge">Docker (可选)</span>
+                </div>
+            </section>
+
+            <!-- 项目架构 -->
+            <section class="section">
+                <h2>🏗️ 项目架构 v2.0</h2>
+                <div class="architecture">
+                    <div class="module">
+                        <h4>🌐 API 层 (src/api/)</h4>
+                        <ul>
+                            <li><strong>app.py</strong>: FastAPI 应用主文件，路由配置</li>
+                            <li><strong>models.py</strong>: Pydantic 数据模型定义</li>
+                            <li><strong>routes/</strong>: 分类、文件、配置等 API 路由</li>
+                            <li>提供完整的 RESTful API 和自动文档（Swagger UI）</li>
+                        </ul>
+                    </div>
+
+                    <div class="module">
+                        <h4>🎯 核心逻辑层 (src/core/)</h4>
+                        <ul>
+                            <li><strong>classifier.py</strong>: UniversalClassifier 通用分类引擎</li>
+                            <li><strong>batch_processor.py</strong>: 批处理器，支持异步/并发</li>
+                            <li>支持多种分类任务的统一处理接口</li>
+                            <li>错误处理和重试机制</li>
+                        </ul>
+                    </div>
+
+                    <div class="module">
+                        <h4>🤖 LLM 集成层 (src/llm/)</h4>
+                        <ul>
+                            <li><strong>client.py</strong>: LLMClient 通用客户端接口</li>
+                            <li><strong>providers/</strong>: 各 LLM 提供商实现</li>
+                            <li>支持本地 vLLM、OpenAI、Qwen、自定义 API</li>
+                            <li>运行时动态切换提供商</li>
+                        </ul>
+                    </div>
+
+                    <div class="module">
+                        <h4>📝 提示词管理 (src/prompts/)</h4>
+                        <ul>
+                            <li><strong>manager.py</strong>: PromptManager 模板管理器</li>
+                            <li><strong>templates/</strong>: 各分类任务的提示词模板</li>
+                            <li>支持动态创建和管理自定义模板</li>
+                            <li>统一的提示词接口和响应解析</li>
+                        </ul>
+                    </div>
+
+                    <div class="module">
+                        <h4>⚙️ 配置管理 (config/)</h4>
+                        <ul>
+                            <li><strong>settings.py</strong>: 集中式配置管理</li>
+                            <li>支持环境变量 (.env) 配置</li>
+                            <li>运行时动态配置更新</li>
+                            <li>多环境配置支持</li>
+                        </ul>
+                    </div>
+
+                    <div class="module">
+                        <h4>🚀 应用入口</h4>
+                        <ul>
+                            <li><strong>main.py</strong>: CLI 命令行工具入口</li>
+                            <li>支持 server、single、batch、tasks、test 等命令</li>
+                            <li>统一的命令行参数解析</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 使用方法 -->
+            <section class="section">
+                <h2>🚀 快速开始</h2>
+
+                <h3>1. 环境准备</h3>
+                <div class="code-block">
+<span class="comment"># 克隆项目</span>
+<span class="keyword">git clone</span> &lt;repository_url&gt;
+<span class="keyword">cd</span> employee_risk_classify
+
+<span class="comment"># 安装依赖</span>
+<span class="keyword">pip install</span> -r requirements.txt
+
+<span class="comment"># 配置环境变量</span>
+<span class="keyword">cp</span> .env.example .env
+<span class="comment"># 编辑 .env 文件配置你的 LLM 提供商信息</span>
+                </div>
+
+                <h3>2. 启动 API 服务</h3>
+                <div class="code-block">
+<span class="comment"># 启动服务器</span>
+<span class="keyword">python</span> main.py server
+
+<span class="comment"># 访问 API 文档</span>
+<span class="comment"># http://localhost:8000/docs</span>
+                </div>
+
+                <h3>3. 命令行使用</h3>
+                <div class="code-block">
+<span class="comment"># 单条分类</span>
+<span class="keyword">python</span> main.py single <span class="string">"软件工程师"</span> -c <span class="string">"科技公司"</span> -t <span class="string">"risk_assessment"</span>
+
+<span class="comment"># 批量处理文件</span>
+<span class="keyword">python</span> main.py batch input.xlsx output.xlsx -t <span class="string">"risk_assessment"</span>
+
+<span class="comment"># 查看可用分类任务</span>
+<span class="keyword">python</span> main.py tasks
+
+<span class="comment"># 测试 LLM 连接</span>
+<span class="keyword">python</span> main.py test
+                </div>
+
+                <h3>4. API 调用示例</h3>
+                <div class="code-block">
+<span class="comment"># 单条分类 API</span>
+<span class="keyword">curl</span> -X POST <span class="string">"http://localhost:8000/api/v1/classification/single"</span> \
+  -H <span class="string">"Content-Type: application/json"</span> \
+  -d <span class="string">'{
+    "job_title": "软件工程师",
+    "company_name": "科技公司",
+    "task_type": "risk_assessment"
+  }'</span>
+
+<span class="comment"># 批量分类 API</span>
+<span class="keyword">curl</span> -X POST <span class="string">"http://localhost:8000/api/v1/classification/batch"</span> \
+  -H <span class="string">"Content-Type: application/json"</span> \
+  -d <span class="string">'{
+    "items": [...],
+    "task_type": "risk_assessment"
+  }'</span>
+                </div>
+
+                <div class="demo-buttons">
+                    <a href="http://localhost:8000/docs" class="btn btn-primary" target="_blank">📖 API 文档</a>
+                    <a href="http://localhost:8000" class="btn btn-success" target="_blank">🚀 启动服务</a>
+                    <a href="#config" class="btn btn-secondary">⚙️ 配置指南</a>
+                </div>
+            </section>
+
+            <!-- API 接口详情 -->
+            <section class="section">
+                <h2>🔧 API 接口详情</h2>
+
+                <h3>分类接口</h3>
+                <table class="config-table">
+                    <thead>
+                        <tr>
+                            <th>接口</th>
+                            <th>方法</th>
+                            <th>说明</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>/api/v1/classification/single</code></td>
+                            <td>POST</td>
+                            <td>单条职业数据分类</td>
+                        </tr>
+                        <tr>
+                            <td><code>/api/v1/classification/batch</code></td>
+                            <td>POST</td>
+                            <td>批量职业数据分类</td>
+                        </tr>
+                        <tr>
+                            <td><code>/api/v1/file/upload</code></td>
+                            <td>POST</td>
+                            <td>上传 Excel/CSV 文件处理</td>
+                        </tr>
+                        <tr>
+                            <td><code>/api/v1/file/status/{task_id}</code></td>
+                            <td>GET</td>
+                            <td>查询处理状态和进度</td>
+                        </tr>
+                        <tr>
+                            <td><code>/api/v1/file/download/{task_id}</code></td>
+                            <td>GET</td>
+                            <td>下载处理结果文件</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3>配置管理接口</h3>
+                <table class="config-table">
+                    <thead>
+                        <tr>
+                            <th>接口</th>
+                            <th>方法</th>
+                            <th>说明</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>/api/v1/llm/config</code></td>
+                            <td>GET</td>
+                            <td>获取当前 LLM 配置</td>
+                        </tr>
+                        <tr>
+                            <td><code>/api/v1/llm/config</code></td>
+                            <td>POST</td>
+                            <td>更新 LLM 配置（运行时）</td>
+                        </tr>
+                        <tr>
+                            <td><code>/api/v1/templates</code></td>
+                            <td>GET</td>
+                            <td>列出所有可用分类模板</td>
+                        </tr>
+                        <tr>
+                            <td><code>/api/v1/templates/custom</code></td>
+                            <td>POST</td>
+                            <td>创建自定义分类模板</td>
+                        </tr>
+                        <tr>
+                            <td><code>/api/v1/templates/custom/{name}</code></td>
+                            <td>DELETE</td>
+                            <td>删除自定义模板</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </section>
+
+            <!-- 配置说明 -->
+            <section class="section" id="config">
+                <h2>⚙️ 配置说明</h2>
+
+                <h3>环境变量配置</h3>
+                <table class="config-table">
+                    <thead>
+                        <tr>
+                            <th>变量名</th>
+                            <th>默认值</th>
+                            <th>说明</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>CLASSIFIER_LLM_PROVIDER</code></td>
+                            <td>local_vllm</td>
+                            <td>LLM 提供商：local_vllm | openai | qwen | custom</td>
+                        </tr>
+                        <tr>
+                            <td><code>CLASSIFIER_LLM_BASE_URL</code></td>
+                            <td>http://localhost:8000/v1</td>
+                            <td>LLM API 基础地址</td>
+                        </tr>
+                        <tr>
+                            <td><code>CLASSIFIER_LLM_MODEL</code></td>
+                            <td>model_name</td>
+                            <td>使用的模型名称</td>
+                        </tr>
+                        <tr>
+                            <td><code>CLASSIFIER_LLM_API_KEY</code></td>
+                            <td>-</td>
+                            <td>API 密钥（外部服务需要）</td>
+                        </tr>
+                        <tr>
+                            <td><code>CLASSIFIER_HOST</code></td>
+                            <td>0.0.0.0</td>
+                            <td>API 服务监听地址</td>
+                        </tr>
+                        <tr>
+                            <td><code>CLASSIFIER_PORT</code></td>
+                            <td>8000</td>
+                            <td>API 服务端口</td>
+                        </tr>
+                        <tr>
+                            <td><code>CLASSIFIER_UPLOAD_PATH</code></td>
+                            <td>uploads</td>
+                            <td>文件上传目录</td>
+                        </tr>
+                        <tr>
+                            <td><code>CLASSIFIER_OUTPUT_PATH</code></td>
+                            <td>outputs</td>
+                            <td>处理结果输出目录</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3>LLM 提供商配置示例</h3>
+
+                <h4>本地 vLLM (推荐)</h4>
+                <div class="code-block">
+CLASSIFIER_LLM_PROVIDER=local_vllm
+CLASSIFIER_LLM_BASE_URL=http://localhost:8000/v1
+CLASSIFIER_LLM_MODEL=/path/to/models/Qwen3-8b-AWQ
+                </div>
+
+                <h4>OpenAI</h4>
+                <div class="code-block">
+CLASSIFIER_LLM_PROVIDER=openai
+OPENAI_API_KEY=your_openai_api_key
+CLASSIFIER_LLM_MODEL=gpt-3.5-turbo
+                </div>
+
+                <h4>通义千问</h4>
+                <div class="code-block">
+CLASSIFIER_LLM_PROVIDER=qwen
+QWEN_API_KEY=your_qwen_api_key
+CLASSIFIER_LLM_MODEL=qwen-turbo
+                </div>
+            </section>
+
+            <!-- 输入输出格式 -->
+            <section class="section">
+                <h2>📄 数据格式说明</h2>
+
+                <h3>输入文件格式 (Excel/CSV)</h3>
+                <div class="code-block">
+岗位名称,公司名称
+软件工程师,科技公司
+电焊工,制造企业
+会计,金融机构
+矿工,煤矿公司
+                </div>
+
+                <h3>输出文件格式</h3>
+                <div class="code-block">
+岗位名称,公司名称,分类结果,分类理由,处理状态,处理时间(秒)
+软件工程师,科技公司,1类,办公室工作无高风险接触,成功,0.52
+电焊工,制造企业,4类,涉及高温和机械操作风险,成功,0.61
+会计,金融机构,1类,室内办公环境安全,成功,0.48
+矿工,煤矿公司,6类,地下作业有严重安全隐患,成功,0.55
+                </div>
+
+                <h3>API 响应格式</h3>
+                <div class="code-block">
+{
+  <span class="string">"success"</span>: true,
+  <span class="string">"result"</span>: {
+    <span class="string">"classification"</span>: <span class="string">"1类"</span>,
+    <span class="string">"reason"</span>: <span class="string">"办公室工作，无高风险环境接触"</span>,
+    <span class="string">"processing_time"</span>: 0.52
+  }
+}
+                </div>
+            </section>
+
+            <!-- 开发指南 -->
+            <section class="section">
+                <h2>🛠️ 开发指南</h2>
+
+                <div class="module">
+                    <h4>添加自定义分类任务</h4>
+                    <ol style="margin-left: 25px;">
+                        <li>在 <code>src/prompts/templates/</code> 创建新的提示词模板类</li>
+                        <li>继承 <code>BasePromptTemplate</code> 基类</li>
+                        <li>实现 <code>get_prompt()</code> 和 <code>parse_response()</code> 方法</li>
+                        <li>在 <code>PromptManager</code> 中注册新模板</li>
+                        <li>通过 API 或 CLI 使用新任务</li>
+                    </ol>
+                </div>
+
+                <div class="module">
+                    <h4>扩展 LLM 提供商</h4>
+                    <ol style="margin-left: 25px;">
+                        <li>在 <code>src/llm/providers/</code> 创建新的提供商类</li>
+                        <li>继承 <code>BaseLLMProvider</code> 基类</li>
+                        <li>实现 <code>generate()</code> 方法</li>
+                        <li>在 <code>PROVIDER_MAP</code> 中注册</li>
+                        <li>通过环境变量切换到新提供商</li>
+                    </ol>
+                </div>
+
+                <div class="module">
+                    <h4>性能优化建议</h4>
+                    <ul style="margin-left: 25px;">
+                        <li><strong>并发处理</strong>: 批量任务调整 <code>max_concurrent</code> 参数</li>
+                        <li><strong>异步架构</strong>: FastAPI 异步处理提升响应速度</li>
+                        <li><strong>缓存机制</strong>: 支持结果缓存减少重复计算</li>
+                        <li><strong>错误恢复</strong>: 单项失败不影响批量处理</li>
+                        <li><strong>资源管理</strong>: 合理配置 LLM 服务的资源限制</li>
+                    </ul>
+                </div>
+            </section>
+
+            <!-- 故障排除 -->
+            <section class="section">
+                <h2>🔍 故障排除</h2>
+
+                <div class="module">
+                    <h4>常见问题</h4>
+                    <ul style="margin-left: 25px;">
+                        <li><strong>LLM 连接失败</strong>: 检查 API 配置和网络连接，确认服务运行状态</li>
+                        <li><strong>文件处理超时</strong>: 调整并发数或分批处理，检查 LLM 性能</li>
+                        <li><strong>内存不足</strong>: 适当减少批处理大小，优化模型配置</li>
+                        <li><strong>分类结果不准确</strong>: 调整提示词模板，使用更强大的模型</li>
+                        <li><strong>API 响应慢</strong>: 检查 LLM 服务性能，考虑使用更快的模型</li>
+                    </ul>
+                </div>
+
+                <div class="module">
+                    <h4>调试模式</h4>
+                    <div class="code-block">
+<span class="comment"># 启用调试模式</span>
+CLASSIFIER_DEBUG=true python main.py server
+
+<span class="comment"># 查看详细日志</span>
+python main.py test  <span class="comment"># 测试 LLM 连接</span>
+python main.py tasks  <span class="comment"># 列出可用任务</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 更新日志 -->
+            <section class="section">
+                <h2>📝 版本更新日志</h2>
+
+                <div class="module">
+                    <h4>v2.0.0 (当前版本) - 2024</h4>
+                    <ul style="margin-left: 25px;">
+                        <li>🎉 全新模块化微服务架构</li>
+                        <li>🚀 多分类任务支持（风险评估、行业分类、技能分析）</li>
+                        <li>🔌 多 LLM 提供商支持（vLLM、OpenAI、通义千问）</li>
+                        <li>🌐 完整 RESTful API 和自动文档</li>
+                        <li>⚡ 异步批处理和并发优化</li>
+                        <li>🎨 自定义模板系统和动态配置</li>
+                        <li>📤 文件上传、后台处理、进度追踪</li>
+                        <li>🛠️ 强大的命令行工具</li>
+                    </ul>
+                </div>
+
+                <div class="module">
+                    <h4>v1.x (已归档到 archive/)</h4>
+                    <ul style="margin-left: 25px;">
+                        <li>基础批处理功能</li>
+                        <li>简单的 GUI 界面</li>
+                        <li>单一风险评估任务</li>
+                        <li>原型 Jupyter Notebook</li>
+                    </ul>
+                </div>
+            </section>
+
+            <!-- 使用场景 -->
+            <section class="section">
+                <h2>💡 典型应用场景</h2>
+                <div class="features">
+                    <div class="feature-card">
+                        <div class="icon">🏢</div>
+                        <h4>保险行业</h4>
+                        <p>职业意外险承保前的风险评估，自动化核保流程，降低人工成本</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">🏭</div>
+                        <h4>企业 HR</h4>
+                        <p>员工入职风险评估，制定安全培训计划，优化岗位配置</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">📊</div>
+                        <h4>数据分析</h4>
+                        <p>大规模职业数据分类统计，行业分布分析，市场研究</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">🎓</div>
+                        <h4>教育培训</h4>
+                        <p>职业技能需求分析，课程设置参考，就业指导</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">🏛️</div>
+                        <h4>政府监管</h4>
+                        <p>职业安全监督，行业统计分析，政策制定支持</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">🔬</div>
+                        <h4>学术研究</h4>
+                        <p>劳动力市场研究，职业分类标准研究，社会学分析</p>
+                    </div>
+                </div>
+            </section>
+
+        </div>
+
+        <footer>
+            <p>🤖 智能职业分类系统 v2.0</p>
+            <p style="opacity: 0.8; margin-top: 10px;">
+                基于 FastAPI + LLM + 模块化架构构建 |
+                <a href="https://github.com/yourusername/employee_risk_classify">GitHub</a>
+            </p>
+            <p style="opacity: 0.7; margin-top: 10px; font-size: 0.9em;">
+                MIT License | 2024
+            </p>
+        </footer>
+    </div>
+</body>
+</html>

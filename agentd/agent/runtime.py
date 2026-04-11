@@ -9,7 +9,9 @@ from datetime import datetime
 from pathlib import Path
 
 import httpx
+from langchain.agents.middleware.types import AgentMiddleware
 from langchain_core.tools import StructuredTool
+from langchain_core.messages import AIMessage, AnyMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
 from langchain.agents.middleware.human_in_the_loop import HumanInTheLoopMiddleware
@@ -29,21 +31,27 @@ PROMPT_DIR = Path(__file__).parent / "prompts"
 def _load_runtime_header(
     agent_id: str,
     session_dir: str,
+    workspace_dir: str,
     user_root: str,
     model_id: str,
     session_id: str,
 ) -> str:
     """Layer 1: Runtime Header — dynamic environment metadata."""
-    return (
-        f"## Environment\n"
-        f"- Working directory: {session_dir}\n"
-        f"- User home: {user_root}\n"
-        f"- Skills directory: {user_root.rstrip('/')}/skills/\n"
-        f"- Date: {datetime.now().strftime('%Y-%m-%d')}\n"
-        f"- Agent: {agent_id}\n"
-        f"- Model: {model_id}\n"
-        f"- Session: {session_id}\n"
-    )
+    lines = [
+        "## Environment",
+        f"- Working directory: {workspace_dir}",
+    ]
+    if workspace_dir != session_dir:
+        lines.append(f"- Session state directory: {session_dir}")
+    lines.extend([
+        f"- User home: {user_root}",
+        f"- Skills directory: {user_root.rstrip('/')}/skills/",
+        f"- Date: {datetime.now().strftime('%Y-%m-%d')}",
+        f"- Agent: {agent_id}",
+        f"- Model: {model_id}",
+        f"- Session: {session_id}",
+    ])
+    return "\n".join(lines) + "\n"
 
 
 def _load_role_prompt(agent_id: str) -> str:
@@ -278,6 +286,7 @@ def _load_compaction_context_layer(session_dir: str) -> str:
 def build_system_prompt(
     agent_id: str,
     session_dir: str,
+    workspace_dir: str | None = None,
     user_root: str = "",
     model_id: str = "",
     session_id: str = "",
@@ -297,6 +306,7 @@ def build_system_prompt(
     """
     layers: list[str] = []
     layer_sizes: dict[str, int] = {}
+    effective_workspace = workspace_dir or session_dir
 
     # Layer 1: Role Prompt (identity — "who you are")
     role = _load_role_prompt(agent_id)
@@ -311,7 +321,14 @@ def build_system_prompt(
     layer_sizes["rules"] = len(rules) if rules else 0
 
     # Layer 3: Runtime Header (dynamic environment)
-    header = _load_runtime_header(agent_id, session_dir, user_root, model_id, session_id)
+    header = _load_runtime_header(
+        agent_id,
+        session_dir,
+        effective_workspace,
+        user_root,
+        model_id,
+        session_id,
+    )
     layers.append(header)
     layer_sizes["header"] = len(header)
 
@@ -428,6 +445,51 @@ _HITL_INTERRUPT_ON: dict[str, bool] = {
     # file_read, file_inspect, skill, list_dir, glob, grep are NOT listed → auto-approved
 }
 
+_KNOWN_SUBTASK_SYSTEM_PREFIXES = (
+    "[Subtask Result",
+    "[Sub-task completed]",
+    "[Sub-task failed]",
+)
+
+
+def _sanitize_nonleading_system_messages(messages: list[AnyMessage]) -> tuple[list[AnyMessage], int]:
+    """Drop or convert any non-leading system messages before provider dispatch."""
+    sanitized: list[AnyMessage] = []
+    converted = 0
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, SystemMessage):
+            sanitized.append(msg)
+            continue
+        if idx == 0:
+            sanitized.append(msg)
+            continue
+        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+        if any(content.startswith(prefix) for prefix in _KNOWN_SUBTASK_SYSTEM_PREFIXES):
+            converted += 1
+            sanitized.append(AIMessage(
+                content=content,
+                additional_kwargs={"agentd_internal": "sanitized_nonleading_system"},
+            ))
+            continue
+        converted += 1
+    return sanitized, converted
+
+
+class ProviderMessageSanitizerMiddleware(AgentMiddleware):
+    """Prevent non-leading system messages from reaching the provider."""
+
+    name = "provider_message_sanitizer"
+
+    async def awrap_model_call(self, request, handler):
+        sanitized_messages, converted = _sanitize_nonleading_system_messages(request.messages)
+        if converted:
+            print(
+                "[runtime] sanitized non-leading system messages "
+                f"count={converted}"
+            )
+            request = request.override(messages=sanitized_messages)
+        return await handler(request)
+
 
 def _build_hitl_middleware(session_dir: str = "") -> HumanInTheLoopMiddleware:
     """Build HITL middleware, respecting FSD mode.
@@ -482,6 +544,8 @@ async def build_agent(
     model_id: str,
     tool_profile: str | None = None,
     parent_session_dir: str | None = None,
+    allowed_tools: list[str] | set[str] | None = None,
+    run_id: str | None = None,
 ):
     """Create a compiled agent for a specific session.
 
@@ -516,6 +580,7 @@ async def build_agent(
 
     # 2. Tools (bound to session context)
     registry = get_registry()
+    effective_workspace = parent_session_dir or session_dir
     ctx = ToolContext(
         user_id=user_id,
         session_id=session_id,
@@ -523,10 +588,13 @@ async def build_agent(
         session_dir=session_dir,
         venv_bin=user_root.rstrip("/") + "/.venv/bin/",
         publish=None,  # SSE events are handled by runner, not tools
-        parent_session_dir=parent_session_dir,
+        workspace_dir=effective_workspace,
+        run_id=run_id or "",
     )
     tools: list[StructuredTool] = registry.get_langchain_tools(
-        ctx, tool_profile=tool_profile,
+        ctx,
+        tool_profile=tool_profile,
+        allowed_tools=set(allowed_tools or []),
     )
 
     if settings.debug:
@@ -541,6 +609,7 @@ async def build_agent(
     system_prompt, prompt_diagnostics = build_system_prompt(
         agent_id=agent_id,
         session_dir=session_dir,
+        workspace_dir=effective_workspace,
         user_root=user_root,
         model_id=model_id,
         session_id=session_id,
@@ -550,6 +619,7 @@ async def build_agent(
     # 4. Middleware (FSD mode disables HITL interrupts)
     # Phase N1: SummarizationMiddleware removed — AgentD-native compaction replaces it.
     hitl = _build_hitl_middleware(session_dir)
+    message_sanitizer = ProviderMessageSanitizerMiddleware()
 
     # 5. Checkpointer
     checkpointer = await get_checkpointer()
@@ -559,7 +629,7 @@ async def build_agent(
         model=llm,
         tools=tools,
         system_prompt=system_prompt,
-        middleware=[hitl],
+        middleware=[message_sanitizer, hitl],
         checkpointer=checkpointer,
     )
 
@@ -569,6 +639,8 @@ async def build_agent(
     agent._context_window_limit = resolved.context_window
     # Phase N1: attach session metadata for auto-compaction in executor
     agent._session_dir = session_dir
+    agent._workspace_dir = effective_workspace
     agent._model_id = model_id
+    agent._run_id = run_id or ""
 
     return agent

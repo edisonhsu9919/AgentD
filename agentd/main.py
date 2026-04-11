@@ -41,7 +41,7 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
 
 
-EXPECTED_SCHEMA_VERSION = "014"
+EXPECTED_SCHEMA_VERSION = "015"
 
 
 async def _check_schema_version() -> None:

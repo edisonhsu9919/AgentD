@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF 翻译器 - 功能展示</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            text-align: center;
+            padding: 60px 20px;
+            color: white;
+        }
+
+        header h1 {
+            font-size: 3em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        header .subtitle {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+
+        .main-content {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            margin-top: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+
+        .section {
+            margin-bottom: 50px;
+        }
+
+        .section h2 {
+            color: #667eea;
+            font-size: 2em;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 3px solid #667eea;
+        }
+
+        .section h3 {
+            color: #764ba2;
+            font-size: 1.5em;
+            margin: 30px 0 15px 0;
+        }
+
+        .pipeline {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            margin: 30px 0;
+            gap: 20px;
+        }
+
+        .pipeline-step {
+            flex: 1;
+            min-width: 200px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px 20px;
+            border-radius: 15px;
+            text-align: center;
+            position: relative;
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.3);
+            transition: transform 0.3s ease;
+        }
+
+        .pipeline-step:hover {
+            transform: translateY(-5px);
+        }
+
+        .pipeline-step .step-number {
+            font-size: 2.5em;
+            font-weight: bold;
+            opacity: 0.3;
+            position: absolute;
+            top: 10px;
+            right: 15px;
+        }
+
+        .pipeline-step .step-title {
+            font-size: 1.2em;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+
+        .pipeline-step .step-desc {
+            font-size: 0.9em;
+            opacity: 0.9;
+        }
+
+        .arrow {
+            font-size: 2em;
+            color: #667eea;
+            font-weight: bold;
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 25px;
+            margin: 30px 0;
+        }
+
+        .feature-card {
+            background: #f8f9fa;
+            padding: 25px;
+            border-radius: 12px;
+            border-left: 4px solid #667eea;
+            transition: all 0.3s ease;
+        }
+
+        .feature-card:hover {
+            transform: translateX(5px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+
+        .feature-card .icon {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .feature-card h4 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 1.2em;
+        }
+
+        .code-block {
+            background: #2d3748;
+            color: #e2e8f0;
+            padding: 20px;
+            border-radius: 10px;
+            overflow-x: auto;
+            margin: 20px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            line-height: 1.5;
+        }
+
+        .code-block .comment {
+            color: #68d391;
+        }
+
+        .code-block .keyword {
+            color: #f687b3;
+        }
+
+        .tech-stack {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .tech-badge {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 25px;
+            font-weight: bold;
+            box-shadow: 0 3px 10px rgba(102, 126, 234, 0.3);
+        }
+
+        .architecture {
+            background: #f8f9fa;
+            padding: 30px;
+            border-radius: 15px;
+            margin: 30px 0;
+        }
+
+        .module {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 15px 0;
+            border-left: 4px solid #764ba2;
+        }
+
+        .module h4 {
+            color: #764ba2;
+            margin-bottom: 10px;
+        }
+
+        .module ul {
+            margin-left: 20px;
+        }
+
+        .module li {
+            margin: 8px 0;
+        }
+
+        .demo-buttons {
+            display: flex;
+            gap: 20px;
+            margin: 30px 0;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 15px 35px;
+            border-radius: 30px;
+            font-size: 1.1em;
+            font-weight: bold;
+            text-decoration: none;
+            transition: all 0.3s ease;
+            display: inline-block;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-secondary {
+            background: white;
+            color: #667eea;
+            border: 2px solid #667eea;
+        }
+
+        .btn-secondary:hover {
+            background: #667eea;
+            color: white;
+        }
+
+        .highlight {
+            background: linear-gradient(135deg, #ffd700 0%, #ffed4e 100%);
+            padding: 2px 8px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+
+        .config-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        .config-table th,
+        .config-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        .config-table th {
+            background: #667eea;
+            color: white;
+            font-weight: bold;
+        }
+
+        .config-table tr:hover {
+            background: #f8f9fa;
+        }
+
+        footer {
+            text-align: center;
+            padding: 40px 20px;
+            color: white;
+            margin-top: 40px;
+        }
+
+        @media (max-width: 768px) {
+            header h1 {
+                font-size: 2em;
+            }
+
+            .pipeline {
+                flex-direction: column;
+            }
+
+            .arrow {
+                transform: rotate(90deg);
+            }
+
+            .demo-buttons {
+                flex-direction: column;
+            }
+
+            .btn {
+                width: 100%;
+                text-align: center;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📄 PDF 翻译器</h1>
+            <p class="subtitle">基于 Ollama 的智能 PDF 文档翻译系统</p>
+        </header>
+
+        <div class="main-content">
+            <!-- 项目概述 -->
+            <section class="section">
+                <h2>📋 项目概述</h2>
+                <p>PDF 翻译器是一个 <span class="highlight">开源的 Python 应用程序</span>，能够将 PDF 文件转换为 Markdown 格式，并通过本地 LLM 模型（via Ollama）将其翻译成中文。该项目提供了 CLI 和 Web UI 两种使用方式。</p>
+            </section>
+
+            <!-- 核心流程 -->
+            <section class="section">
+                <h2>🔄 核心处理流程</h2>
+                <div class="pipeline">
+                    <div class="pipeline-step">
+                        <div class="step-number">1</div>
+                        <div class="step-title">📄 PDF 解析</div>
+                        <div class="step-desc">使用 marker 库将 PDF 转换为结构化的 Markdown</div>
+                    </div>
+                    <div class="arrow">→</div>
+                    <div class="pipeline-step">
+                        <div class="step-number">2</div>
+                        <div class="step-title">✂️ 智能分段</div>
+                        <div class="step-desc">按段落分割，符合字符数限制要求</div>
+                    </div>
+                    <div class="arrow">→</div>
+                    <div class="pipeline-step">
+                        <div class="step-number">3</div>
+                        <div class="step-title">🌐 AI 翻译</div>
+                        <div class="step-desc">通过 Ollama API 调用本地模型翻译</div>
+                    </div>
+                    <div class="arrow">→</div>
+                    <div class="pipeline-step">
+                        <div class="step-number">4</div>
+                        <div class="step-title">📝 合并输出</div>
+                        <div class="step-desc">重组翻译块，生成最终文档</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 核心功能 -->
+            <section class="section">
+                <h2>✨ 核心功能特性</h2>
+                <div class="features">
+                    <div class="feature-card">
+                        <div class="icon">🔄</div>
+                        <h4>PDF 转 Markdown</h4>
+                        <p>基于 marker 库的高质量 PDF 解析，保留文档结构和格式</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">✂️</div>
+                        <h4>智能文本分段</h4>
+                        <p>按自然段落分割，支持 min/max 字符限制，优化翻译质量</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">🤖</div>
+                        <h4>本地 LLM 翻译</h4>
+                        <p>集成 Ollama API，支持多种开源模型，数据隐私有保障</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">🎨</div>
+                        <h4>Streamlit Web UI</h4>
+                        <p>友好的图形界面，支持文件上传、参数配置、结果下载</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">⚙️</div>
+                        <h4>灵活配置</h4>
+                        <p>可自定义模型、API 地址、分段参数等</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">🔒</div>
+                        <h4>UUID 文件管理</h4>
+                        <p>自动生成唯一文件名，防止冲突，便于批量处理</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 技术栈 -->
+            <section class="section">
+                <h2>🛠️ 技术栈</h2>
+                <div class="tech-stack">
+                    <span class="tech-badge">Python 3</span>
+                    <span class="tech-badge">Marker (PDF 解析)</span>
+                    <span class="tech-badge">Streamlit (Web UI)</span>
+                    <span class="tech-badge">Requests (HTTP 客户端)</span>
+                    <span class="tech-badge">Ollama (LLM 后端)</span>
+                    <span class="tech-badge">Qwen2.5 (默认模型)</span>
+                </div>
+            </section>
+
+            <!-- 项目架构 -->
+            <section class="section">
+                <h2>🏗️ 项目架构</h2>
+                <div class="architecture">
+                    <div class="module">
+                        <h4>📦 converter/ - 转换模块</h4>
+                        <ul>
+                            <li><strong>pdf_to_md.py</strong>: PDF → Markdown 转换器，使用 marker 的 PdfConverter</li>
+                            <li><strong>splitter.py</strong>: 智能文本分段器，基于双换行符分割段落，支持 min/max 限制合并</li>
+                        </ul>
+                    </div>
+                    <div class="module">
+                        <h4>🌐 translator/ - 翻译模块</h4>
+                        <ul>
+                            <li><strong>llm_api.py</strong>: Ollama API 集成，POST 到 <code>/api/generate</code> 端点</li>
+                            <li>默认模型: <code>qwen2.5:1.5b</code> @ <code>http://localhost:11434</code></li>
+                        </ul>
+                    </div>
+                    <div class="module">
+                        <h4>🚀 应用入口</h4>
+                        <ul>
+                            <li><strong>main.py</strong>: CLI 模式入口，支持命令行参数</li>
+                            <li><strong>streamlit_ui.py</strong>: Web UI 模式，提供可视化界面</li>
+                            <li><strong>run.sh</strong>: 启动脚本，配置端口和地址</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 使用方法 -->
+            <section class="section">
+                <h2>🚀 使用方法</h2>
+
+                <h3>方式一：命令行模式 (CLI)</h3>
+                <div class="code-block">
+<span class="keyword">python</span> main.py \
+  --input_pdf testfiles/medical_case_report.pdf \
+  --output_dir outputs \
+  --min_chars 100 \
+  --max_chars 1000
+                </div>
+
+                <h3>方式二：Web UI 模式 (推荐)</h3>
+                <div class="code-block">
+<span class="comment"># 方法 1: 使用启动脚本</span>
+./run.sh
+
+<span class="comment"># 方法 2: 直接运行 streamlit</span>
+<span class="keyword">streamlit run</span> streamlit_ui.py \
+  --server.port=8501 \
+  --server.address=0.0.0.0
+                </div>
+                <p style="margin-top: 15px;">启动后访问: <code>http://localhost:8501</code></p>
+
+                <div class="demo-buttons">
+                    <a href="#" class="btn btn-primary" onclick="alert('请在本地运行项目后访问 http://localhost:8501'); return false;">🌐 启动 Web UI</a>
+                    <a href="#" class="btn btn-secondary" onclick="alert('请参考 CLAUDE.md 文件获取详细文档'); return false;">📖 查看文档</a>
+                </div>
+            </section>
+
+            <!-- 配置参数 -->
+            <section class="section">
+                <h2>⚙️ 配置参数说明</h2>
+                <table class="config-table">
+                    <thead>
+                        <tr>
+                            <th>参数名称</th>
+                            <th>默认值</th>
+                            <th>说明</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>min_chars</td>
+                            <td>100</td>
+                            <td>每个文本块的最小字符数</td>
+                        </tr>
+                        <tr>
+                            <td>max_chars</td>
+                            <td>1000</td>
+                            <td>每个文本块的最大字符数</td>
+                        </tr>
+                        <tr>
+                            <td>model</td>
+                            <td>qwen2.5:1.5b</td>
+                            <td>使用的 Ollama 模型名称</td>
+                        </tr>
+                        <tr>
+                            <td>url</td>
+                            <td>http://localhost:11434/api/generate</td>
+                            <td>Ollama API 地址</td>
+                        </tr>
+                        <tr>
+                            <td>output_dir</td>
+                            <td>outputs</td>
+                            <td>输出文件保存目录</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </section>
+
+            <!-- 文件命名规则 -->
+            <section class="section">
+                <h2>📁 文件命名规则</h2>
+                <p>系统使用 UUID 前缀避免文件名冲突：</p>
+                <div class="code-block">
+输入文件: {uuid}_{original_filename}.pdf
+Markdown: {uuid}_{original_filename}.md
+翻译结果: {uuid}_{original_filename}_translated.md
+
+<span class="comment"># 示例:</span>
+41dca899_Corporate_Governance.pdf
+41dca899_Corporate_Governance.md
+41dca899_Corporate_Governance_translated.md
+                </div>
+            </section>
+
+            <!-- Web UI 特性 -->
+            <section class="section">
+                <h2>🎨 Web UI 特色功能</h2>
+                <div class="features">
+                    <div class="feature-card">
+                        <div class="icon">📤</div>
+                        <h4>文件上传</h4>
+                        <p>拖拽或点击上传 PDF，自动生成 UUID 文件名</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">🎛️</div>
+                        <h4>参数调节</h4>
+                        <p>滑块调整分段参数，实时预览配置</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">📥</div>
+                        <h4>结果下载</h4>
+                        <p>一键下载 Markdown 和翻译结果</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">🧹</div>
+                        <h4>文件管理</h4>
+                        <p>输出目录清理工具，批量删除旧文件</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">📊</div>
+                        <h4>文件信息</h4>
+                        <p>显示文件大小、修改时间等元数据</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="icon">🔧</div>
+                        <h4>模型配置</h4>
+                        <p>支持自定义模型名称和 API 地址</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 使用场景 -->
+            <section class="section">
+                <h2>💡 典型应用场景</h2>
+                <div class="module">
+                    <h4>📚 学术研究</h4>
+                    <p>翻译英文学术论文、期刊文章，保留 Markdown 格式便于后续编辑</p>
+                </div>
+                <div class="module">
+                    <h4>📄 技术文档</h4>
+                    <p>将英文技术手册、API 文档翻译成中文，提高团队协作效率</p>
+                </div>
+                <div class="module">
+                    <h4>🏥 医疗报告</h4>
+                    <p>翻译医学案例报告、临床研究文档（testfiles 中包含医疗示例）</p>
+                </div>
+                <div class="module">
+                    <h4>🔒 隐私保护</h4>
+                    <p>本地部署 Ollama，敏感文档翻译不经过外部服务器</p>
+                </div>
+            </section>
+
+            <!-- 前置要求 -->
+            <section class="section">
+                <h2>⚡ 前置要求</h2>
+                <div class="code-block">
+<span class="comment"># 1. 安装 Ollama</span>
+<span class="keyword">curl</span> -fsSL https://ollama.com/install.sh | sh
+
+<span class="comment"># 2. 拉取模型</span>
+<span class="keyword">ollama pull</span> qwen2.5:1.5b
+
+<span class="comment"># 3. 确认 Ollama 服务运行</span>
+<span class="keyword">ollama serve</span>  <span class="comment"># 默认监听 http://localhost:11434</span>
+                </div>
+            </section>
+
+        </div>
+
+        <footer>
+            <p>🚀 PDF 翻译器 - 开源智能文档翻译工具</p>
+            <p style="opacity: 0.8; margin-top: 10px;">基于 Python + Ollama + Streamlit 构建</p>
+        </footer>
+    </div>
+</body>
+</html>

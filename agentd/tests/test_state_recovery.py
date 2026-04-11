@@ -245,6 +245,51 @@ class TestRuntimeEndpoint:
             response = test_client.get(f"/api/sessions/{uuid.uuid4()}/runtime")
         assert response.status_code == 404
 
+    def test_runtime_surfaces_last_failed_run_error(self, setup):
+        session, user, sid = setup
+        from api.deps import get_current_user
+        from core.database import get_db
+        from main import app
+
+        db = AsyncMock()
+        diag_run = MagicMock()
+        diag_run.diagnostics = {
+            "last_call_prompt_tokens": 12,
+            "last_call_completion_tokens": 3,
+            "context_window_limit": 1000,
+            "context_usage_ratio": 0.1,
+        }
+        failed_run = MagicMock()
+        failed_run.error = "subtask continuation failed"
+        count_result = MagicMock()
+        count_result.scalar_one.return_value = 0
+        db.execute = AsyncMock(side_effect=[
+            MagicMock(scalar_one_or_none=MagicMock(return_value=diag_run)),
+            MagicMock(scalar_one_or_none=MagicMock(return_value=failed_run)),
+            count_result,
+        ])
+
+        async def override_get_db():
+            return db
+
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_current_user] = lambda: user
+
+        with (
+            patch("session.router.session_svc") as mock_session_svc,
+            patch("permission.service.count_pending_by_session", new_callable=AsyncMock, return_value=0),
+        ):
+            mock_session_svc.get_session = AsyncMock(return_value=session)
+            mock_session_svc.get_last_message_seq = AsyncMock(return_value=5)
+            client = TestClient(app)
+            response = client.get(f"/api/sessions/{sid}/runtime")
+
+        app.dependency_overrides.clear()
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["last_error"] == "subtask continuation failed"
+
 
 class TestPendingPermissionsEndpoint:
     """Test GET /api/sessions/{id}/permissions/pending."""

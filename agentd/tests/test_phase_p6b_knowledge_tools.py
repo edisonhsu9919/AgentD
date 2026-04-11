@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from tools.base import ToolContext
+from tools.knowledge_routing import reset_knowledge_route_state
 from tools.registry import get_registry
 from knowledge.store import (
     build_frontmatter,
@@ -76,15 +77,26 @@ def populated_knowledge(knowledge_root):
     )
 
 
-def _make_ctx(user_id: str = "user-a") -> ToolContext:
+def _make_ctx(user_id: str = "user-a", run_id: str = "") -> ToolContext:
     return ToolContext(
         user_id=user_id,
         session_id="test-session",
         user_root="/tmp/test",
         session_dir="/tmp/test/sessions/test",
+        workspace_dir="/tmp/test/sessions/test",
         venv_bin="",
         publish=AsyncMock(),
+        run_id=run_id,
     )
+
+
+def _get_lc_tool(name: str, ctx: ToolContext):
+    registry = get_registry()
+    tools = registry.get_langchain_tools(ctx)
+    for tool in tools:
+        if tool.name == name:
+            return tool
+    raise AssertionError(f"Missing tool {name}")
 
 
 # ── knowledge_catalog ────────────────────────────────────────────────────
@@ -249,3 +261,51 @@ class TestRegistryP6B:
             meta = registry.get(name).metadata
             assert meta.is_read_only is True
             assert meta.access_scope == "system_scoped"
+
+    @pytest.mark.asyncio
+    async def test_registry_blocks_search_before_catalog(self, populated_knowledge):
+        run_id = "run-search-block"
+        reset_knowledge_route_state(run_id)
+        search = _get_lc_tool("knowledge_search", _make_ctx(run_id=run_id))
+
+        result = await search.ainvoke({"query": "insurance"})
+
+        assert "knowledge_catalog first" in result
+
+    @pytest.mark.asyncio
+    async def test_registry_blocks_read_before_catalog(self, populated_knowledge):
+        run_id = "run-read-block"
+        reset_knowledge_route_state(run_id)
+        reader = _get_lc_tool("knowledge_read", _make_ctx(run_id=run_id))
+
+        result = await reader.ainvoke({"doc_id": "ins001"})
+
+        assert "knowledge_catalog first" in result
+
+    @pytest.mark.asyncio
+    async def test_registry_allows_search_after_catalog(self, populated_knowledge):
+        run_id = "run-search-allow"
+        reset_knowledge_route_state(run_id)
+        ctx = _make_ctx(run_id=run_id)
+        catalog = _get_lc_tool("knowledge_catalog", ctx)
+        search = _get_lc_tool("knowledge_search", ctx)
+
+        await catalog.ainvoke({})
+        result = await search.ainvoke({"query": "insurance"})
+        data = json.loads(result)
+
+        assert data["total_matches"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_registry_allows_read_after_catalog_without_search(self, populated_knowledge):
+        run_id = "run-read-allow"
+        reset_knowledge_route_state(run_id)
+        ctx = _make_ctx(run_id=run_id)
+        catalog = _get_lc_tool("knowledge_catalog", ctx)
+        reader = _get_lc_tool("knowledge_read", ctx)
+
+        await catalog.ainvoke({})
+        result = await reader.ainvoke({"doc_id": "ins001"})
+        data = json.loads(result)
+
+        assert data["doc_id"] == "ins001"

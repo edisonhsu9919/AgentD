@@ -1,11 +1,11 @@
 """Agent worker — independent process that claims and executes agent_runs.
 
 Usage:
-    python -m agent.worker [--worker-id W1] [--poll-interval 2]
+    python -m agent.worker [--worker-id W1] [--poll-interval 2] [--max-concurrent 4]
 
-Phase C: Each worker is a standalone asyncio process. It polls the
-agent_runs table for queued work, claims one run at a time (v1),
-executes it via the executor, and marks it complete/failed.
+Phase 7A: Concurrent multi-run worker. Spawns an asyncio Task per claimed run,
+with session-level mutual exclusion (same session is never executed concurrently
+across any worker). Uses DB-level subquery exclusion + in-memory fast-path.
 
 The worker does NOT serve HTTP. It shares the same DB and checkpointer
 as the API server.
@@ -29,78 +29,143 @@ from core.database import AsyncSessionLocal
 
 DEFAULT_POLL_INTERVAL = 2  # seconds between queue polls
 DEFAULT_LEASE_SECONDS = 300  # 5 minutes
+DEFAULT_MAX_CONCURRENT = 4  # conservative default; tune after benchmarking
+DRAIN_TIMEOUT = 60  # seconds to wait for active runs on shutdown
 
 
 # ── Worker ───────────────────────────────────────────────────────────────
 
 
 class AgentWorker:
-    """Single-run-at-a-time agent worker."""
+    """Concurrent multi-run agent worker (Phase 7A).
+
+    Spawns an asyncio.Task per claimed run, with session-level mutual
+    exclusion to prevent checkpoint write conflicts. Different sessions
+    execute concurrently; same-session runs are serialized.
+    """
 
     def __init__(
         self,
         worker_id: str | None = None,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT,
     ):
         self.worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
         self.poll_interval = poll_interval
         self.lease_seconds = lease_seconds
+        self.max_concurrent = max_concurrent
         self._shutdown = False
-        self._current_run_id: uuid.UUID | None = None
+        # Phase 7A: concurrent state
+        self._active_runs: dict[uuid.UUID, asyncio.Task] = {}
+        self._active_sessions: set[uuid.UUID] = set()
 
     async def run(self) -> None:
-        """Main worker loop: poll → claim → execute → repeat."""
+        """Main worker loop: claim → spawn tasks → heartbeat (Phase 7A concurrent)."""
         print(
             f"[worker:{self.worker_id}] Starting "
-            f"(PID={os.getpid()}, poll={self.poll_interval}s, lease={self.lease_seconds}s)"
+            f"(PID={os.getpid()}, poll={self.poll_interval}s, "
+            f"lease={self.lease_seconds}s, max_concurrent={self.max_concurrent})"
         )
-        print(f"[worker:{self.worker_id}] Claim loop ready — polling for queued runs")
+        print(f"[worker:{self.worker_id}] Concurrent claim loop ready")
 
-        while not self._shutdown:
-            try:
-                claimed = await self._poll_and_execute()
-                if not claimed:
+        heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(), name=f"{self.worker_id}-heartbeat"
+        )
+
+        try:
+            while not self._shutdown:
+                try:
+                    # 1. Reap completed tasks
+                    self._reap_done_tasks()
+
+                    # 2. If we have capacity, try to claim and spawn
+                    if len(self._active_runs) < self.max_concurrent:
+                        claimed = await self._try_claim_and_spawn()
+                        if not claimed:
+                            await asyncio.sleep(self.poll_interval)
+                    else:
+                        # At capacity — wait for any task to finish or poll timeout
+                        if self._active_runs:
+                            done, _ = await asyncio.wait(
+                                list(self._active_runs.values()),
+                                timeout=self.poll_interval,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                        else:
+                            await asyncio.sleep(self.poll_interval)
+
+                except asyncio.CancelledError:
+                    print(f"[worker:{self.worker_id}] Cancelled, shutting down")
+                    break
+                except Exception:
+                    print(f"[worker:{self.worker_id}] Unexpected error in poll loop:")
+                    traceback.print_exc()
                     await asyncio.sleep(self.poll_interval)
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
             except asyncio.CancelledError:
-                print(f"[worker:{self.worker_id}] Cancelled, shutting down")
-                break
-            except Exception:
-                print(f"[worker:{self.worker_id}] Unexpected error in poll loop:")
-                traceback.print_exc()
-                await asyncio.sleep(self.poll_interval)
+                pass
+            await self._drain_active_runs()
 
         print(f"[worker:{self.worker_id}] Stopped")
 
-    async def _poll_and_execute(self) -> bool:
-        """Try to claim one run and execute it. Returns True if work was done."""
-        # Also reclaim expired leases periodically
+    # ── Concurrent task management (Phase 7A) ────────────────────────────
+
+    async def _try_claim_and_spawn(self) -> bool:
+        """Claim one run (with global session exclusion) and spawn as Task."""
+        # Reclaim expired leases
         async with AsyncSessionLocal() as db:
             reclaimed = await scheduler.reclaim_expired_runs(db)
             if reclaimed > 0:
                 await db.commit()
                 print(f"[worker:{self.worker_id}] Reclaimed {reclaimed} expired runs")
 
-        # Claim work
+        # Claim with DB-level + memory-level session exclusion
         async with AsyncSessionLocal() as db:
-            run = await scheduler.claim_run(db, self.worker_id, self.lease_seconds)
+            run = await scheduler.claim_run_concurrent(
+                db, self.worker_id, self.lease_seconds,
+                local_exclude=self._active_sessions,
+            )
             if run is None:
                 await db.commit()
                 return False
 
             run_id = run.id
-            session_id = str(run.session_id)
+            session_id = run.session_id
             run_type = run.run_type
             payload = run.payload or {}
-            self._current_run_id = run_id
 
-            print(f"[worker:{self.worker_id}] Claimed run {run_id} (type={run_type}, session={session_id})")
+            active_count = len(self._active_runs) + 1
+            print(
+                f"[worker:{self.worker_id}] [{active_count}/{self.max_concurrent}] "
+                f"Claimed run {run_id} (type={run_type}, session={str(session_id)[:8]})"
+            )
 
-            # Mark as running
             await scheduler.mark_running(db, run_id)
             await db.commit()
 
-        # Execute
+        # Register session as active and spawn task
+        self._active_sessions.add(session_id)
+        task = asyncio.create_task(
+            self._execute_run(run_id, str(session_id), run_type, payload),
+            name=f"run-{run_id}",
+        )
+        self._active_runs[run_id] = task
+        return True
+
+    async def _execute_run(
+        self,
+        run_id: uuid.UUID,
+        session_id: str,
+        run_type: str,
+        payload: dict,
+    ) -> None:
+        """Execute a single run in its own Task. Handles completion/failure."""
+        import time
+        t0 = time.monotonic()
         try:
             if run_type == "start":
                 await self._execute_start(session_id, run_id, payload)
@@ -116,15 +181,20 @@ class AgentWorker:
                 await scheduler.mark_completed(db, run_id)
                 await db.commit()
 
-            print(f"[worker:{self.worker_id}] Completed run {run_id}")
+            elapsed = time.monotonic() - t0
+            active_count = len(self._active_runs) - 1  # this one is finishing
+            print(
+                f"[worker:{self.worker_id}] [{active_count}/{self.max_concurrent}] "
+                f"Completed run {run_id} in {elapsed:.1f}s"
+            )
 
-            # Phase P3: child result bridge — if this session is a child,
-            # push results back to the parent session
+            # Child result bridge
             await self._bridge_child_result(session_id)
 
         except Exception as e:
             error_msg = f"{type(e).__name__}: {e}"
-            print(f"[worker:{self.worker_id}] Failed run {run_id}: {error_msg}")
+            elapsed = time.monotonic() - t0
+            print(f"[worker:{self.worker_id}] Failed run {run_id} after {elapsed:.1f}s: {error_msg}")
             if settings.debug:
                 traceback.print_exc()
 
@@ -132,22 +202,90 @@ class AgentWorker:
                 await scheduler.mark_failed(db, run_id, error_msg)
                 await db.commit()
 
-            # Update session status to error
             from agent.executor import _update_db_status
-            await _update_db_status(session_id, "error")
-            await self._publish(session_id, {"event": "status_change", "status": "error"})
+            is_subtask_continuation = (
+                run_type == "start" and payload.get("is_subtask_continuation", False)
+            )
+            next_status = "idle" if is_subtask_continuation else "error"
+            await _update_db_status(session_id, next_status)
+            await self._publish(session_id, {"event": "status_change", "status": next_status})
             await self._publish(session_id, {
-                "event": "error", "code": "worker_error", "message": error_msg,
+                "event": "error",
+                "code": (
+                    "subtask_continuation_error"
+                    if is_subtask_continuation
+                    else "worker_error"
+                ),
+                "message": error_msg,
             })
+            if is_subtask_continuation:
+                print(
+                    f"[worker:{self.worker_id}] Subtask continuation failed; "
+                    f"restoring session {session_id[:8]} to idle so the bridged result remains usable"
+                )
 
-            # Phase 6: child failure bridge — if this failed session is a child,
-            # bridge the failure back to parent so it doesn't stay stuck in subtask_waiting
+            # Child failure bridge
             await self._bridge_child_failure(session_id, error_msg)
 
         finally:
-            self._current_run_id = None
+            # Release session slot
+            sid = uuid.UUID(session_id)
+            self._active_sessions.discard(sid)
 
-        return True
+    def _reap_done_tasks(self) -> None:
+        """Clean up completed/failed tasks from _active_runs."""
+        done_ids = [rid for rid, t in self._active_runs.items() if t.done()]
+        for rid in done_ids:
+            task = self._active_runs.pop(rid)
+            exc = task.exception()
+            if exc:
+                print(
+                    f"[worker:{self.worker_id}] Task {rid} had unhandled exception: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+    async def _heartbeat_loop(self) -> None:
+        """Periodically renew leases for all active runs (Phase 7A).
+
+        Runs as a background task for the lifetime of the worker.
+        Interval = lease_seconds / 3 to ensure renewal well before expiry.
+        """
+        interval = max(self.lease_seconds // 3, 10)
+        while not self._shutdown:
+            try:
+                active_run_ids = list(self._active_runs.keys())
+                if active_run_ids:
+                    async with AsyncSessionLocal() as db:
+                        for run_id in active_run_ids:
+                            try:
+                                await scheduler.renew_lease(db, run_id, self.lease_seconds)
+                            except Exception:
+                                pass  # run may have completed between snapshot and renew
+                        await db.commit()
+            except Exception:
+                pass  # best-effort — don't crash the heartbeat loop
+            await asyncio.sleep(interval)
+
+    async def _drain_active_runs(self) -> None:
+        """Wait for all active runs to complete on shutdown, with timeout."""
+        if not self._active_runs:
+            return
+        count = len(self._active_runs)
+        print(f"[worker:{self.worker_id}] Draining {count} active runs (timeout={DRAIN_TIMEOUT}s)...")
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*self._active_runs.values(), return_exceptions=True),
+                timeout=DRAIN_TIMEOUT,
+            )
+            print(f"[worker:{self.worker_id}] All runs drained successfully")
+        except asyncio.TimeoutError:
+            print(f"[worker:{self.worker_id}] Drain timeout, cancelling remaining tasks")
+            for task in self._active_runs.values():
+                task.cancel()
+            # Wait briefly for cancellations to propagate
+            await asyncio.gather(*self._active_runs.values(), return_exceptions=True)
+
+    # ── Run type handlers ────────────────────────────────────────────────
 
     async def _execute_start(self, session_id: str, run_id: uuid.UUID, payload: dict) -> None:
         """Execute a 'start' run."""
@@ -174,6 +312,8 @@ class AgentWorker:
             tool_profile=payload.get("tool_profile"),
             is_subtask_continuation=payload.get("is_subtask_continuation", False),
             parent_session_dir=payload.get("parent_session_dir"),
+            allowed_tools=payload.get("allowed_tools"),
+            run_id=str(run_id),
         )
 
         # Renew lease before completion bookkeeping
@@ -197,6 +337,7 @@ class AgentWorker:
             decisions=decisions,
             publish=self._publish,
             check_abort=check_abort,
+            run_id=str(run_id),
         )
 
     async def _execute_abort(self, session_id: str, run_id: uuid.UUID) -> None:
@@ -212,6 +353,10 @@ class AgentWorker:
             # Cancel all pending permission requests (#42 — prevent truth conflict)
             from permission import service as perm_svc
             cancelled_perms = await perm_svc.cancel_pending_by_session(db, sid)
+
+            # Phase 7A: clear session interrupt flag
+            await scheduler.clear_interrupt(db, sid)
+
             await db.commit()
 
             if cancelled_perms > 0:
@@ -599,12 +744,22 @@ class AgentWorker:
             return []
 
     def _make_abort_checker(self, session_id: uuid.UUID, current_run_id: uuid.UUID):
-        """Create a closure that checks for pending abort signals."""
+        """Create a closure that checks for pending abort signals (Phase 7A).
+
+        Uses session-level interrupt flag (preferred) with fallback to
+        legacy queued abort run check for backward compatibility.
+        """
+        current_task = asyncio.current_task()
+
         async def _check() -> bool:
             if self._shutdown:
                 return True
+            # Task-level cancellation check (e.g. during drain)
+            if current_task and current_task.cancelled():
+                return True
+            # Session-level interrupt flag + legacy fallback
             async with AsyncSessionLocal() as db:
-                return await scheduler.has_pending_abort(db, session_id)
+                return await scheduler.is_interrupted(db, session_id)
         return _check
 
     async def _publish(self, session_id: str, event: dict) -> None:
@@ -627,9 +782,13 @@ class AgentWorker:
             pass
 
     def shutdown(self) -> None:
-        """Signal the worker to stop after the current run completes."""
+        """Signal the worker to stop. Active runs will drain before exit."""
         self._shutdown = True
-        print(f"[worker:{self.worker_id}] Shutdown requested")
+        active = len(self._active_runs)
+        print(
+            f"[worker:{self.worker_id}] Shutdown requested "
+            f"({active} active run{'s' if active != 1 else ''} will drain)"
+        )
 
 
 # ── Entry point ──────────────────────────────────────────────────────────
@@ -640,12 +799,18 @@ def main():
     parser.add_argument("--worker-id", default=None, help="Unique worker identifier")
     parser.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_INTERVAL)
     parser.add_argument("--lease-seconds", type=int, default=DEFAULT_LEASE_SECONDS)
+    parser.add_argument(
+        "--max-concurrent", type=int,
+        default=int(os.environ.get("WORKER_MAX_CONCURRENT", DEFAULT_MAX_CONCURRENT)),
+        help=f"Maximum concurrent runs per worker (default: {DEFAULT_MAX_CONCURRENT})",
+    )
     args = parser.parse_args()
 
     worker = AgentWorker(
         worker_id=args.worker_id,
         poll_interval=args.poll_interval,
         lease_seconds=args.lease_seconds,
+        max_concurrent=args.max_concurrent,
     )
 
     loop = asyncio.new_event_loop()

@@ -16,7 +16,7 @@ import os
 from typing import Any
 
 from tools.base import BaseTool, ToolContext
-from workspace.manager import is_internal_path, validate_path, validate_path_dual
+from workspace.manager import is_internal_path, validate_path
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ class FileInspectTool(BaseTool):
             return {"output": "Access denied: path points to internal system directory", "is_error": True}
 
         try:
-            abs_path = validate_path_dual(ctx.session_dir, ctx.parent_session_dir, path)
+            abs_path = validate_path(ctx.workspace_dir, path)
         except PermissionError as e:
             return {"output": str(e), "is_error": True}
 

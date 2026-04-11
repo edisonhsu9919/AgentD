@@ -75,29 +75,28 @@ class ToolRegistry:
     # Tools forbidden in child profiles — prevent infinite nesting
     _CHILD_FORBIDDEN = {"launch_detached_process", "launch_subagent"}
 
-    # Default child profile: read-only tools + knowledge retrieval
-    _CHILD_DEFAULT_TOOLS = {
-        "file_read", "file_inspect", "list_dir", "glob", "grep",
-        "knowledge_catalog", "knowledge_search", "knowledge_read",
-    }
+    def resolve_tool_names(
+        self, tool_profile: str | None = None, allowed_tools: set[str] | None = None,
+    ) -> set[str]:
+        """Resolve the concrete tool-name set for a profile."""
+        all_tools = set(self._tools)
+        if tool_profile is None:
+            return all_tools
+
+        if tool_profile == "child":
+            inherited = all_tools - self._CHILD_FORBIDDEN
+            if allowed_tools:
+                inherited &= allowed_tools
+            return inherited
+
+        return all_tools
 
     def _filter_by_profile(
         self, tool_profile: str | None, allowed_tools: set[str] | None = None,
     ) -> dict[str, "BaseTool"]:
         """Return tools filtered by profile."""
-        if tool_profile is None:
-            return dict(self._tools)
-
-        if tool_profile == "child":
-            base = set(self._CHILD_DEFAULT_TOOLS)
-            if allowed_tools:
-                base |= allowed_tools
-            # Always exclude spawn/detach tools
-            base -= self._CHILD_FORBIDDEN
-            return {n: t for n, t in self._tools.items() if n in base}
-
-        # Unknown profile → return all (safe fallback)
-        return dict(self._tools)
+        resolved = self.resolve_tool_names(tool_profile, allowed_tools)
+        return {n: t for n, t in self._tools.items() if n in resolved}
 
     # ── LangChain integration ────────────────────────────────────────────────
 
@@ -113,7 +112,7 @@ class ToolRegistry:
 
         Args:
             tool_profile: None for full set, "child" for restricted child agent.
-            allowed_tools: Extra tools to include in child profile beyond defaults.
+            allowed_tools: Optional narrowing set applied to the child profile.
         """
         tools = self._filter_by_profile(tool_profile, allowed_tools)
         lc_tools = []
@@ -215,6 +214,14 @@ def _make_coroutine(tool: BaseTool, ctx: ToolContext):
     from tools.base import MAX_RESULTS_PER_TURN_CHARS
 
     async def _run(**kwargs: Any) -> str:
+        from tools.knowledge_routing import guard_knowledge_route, note_knowledge_tool_result
+
+        run_key = ctx.run_id or ctx.session_id
+
+        route_block = guard_knowledge_route(run_key, tool.name)
+        if route_block:
+            raise ToolException(route_block)
+
         # Per-run dedup guard — prevent identical tool call loops
         dedup_warning = _check_tool_dedup(ctx.session_id, tool.name, kwargs)
         if dedup_warning:
@@ -222,6 +229,7 @@ def _make_coroutine(tool: BaseTool, ctx: ToolContext):
             raise ToolException(dedup_warning)
 
         result = await tool.execute(ctx, **kwargs)
+        note_knowledge_tool_result(run_key, tool.name, bool(result.get("is_error")))
         output = str(result.get("output", ""))
         if result.get("is_error"):
             raise ToolException(output)

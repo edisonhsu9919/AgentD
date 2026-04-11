@@ -57,11 +57,13 @@ class TestSkillToolVersionedLoad:
 
         tool = SkillTool()
         from tools.base import ToolContext
+        session_dir = get_session_dir(user_root, "s1")
         ctx = ToolContext(
             user_id="u1",
             session_id="s1",
             user_root=user_root,
-            session_dir=get_session_dir(user_root, "s1"),
+            session_dir=session_dir,
+            workspace_dir=session_dir,
             venv_bin="/tmp/venv/bin",
             publish=lambda *a, **kw: None,
         )
@@ -82,11 +84,13 @@ class TestSkillToolVersionedLoad:
 
         tool = SkillTool()
         from tools.base import ToolContext
+        session_dir = get_session_dir(user_root, "s1")
         ctx = ToolContext(
             user_id="u1",
             session_id="s1",
             user_root=user_root,
-            session_dir=get_session_dir(user_root, "s1"),
+            session_dir=session_dir,
+            workspace_dir=session_dir,
             venv_bin="/tmp/venv/bin",
             publish=lambda *a, **kw: None,
         )

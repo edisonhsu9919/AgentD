@@ -155,6 +155,7 @@ class TestFileToolsRejectInternal:
             session_id="test-session",
             user_root=user_root,
             session_dir=session_dir,
+            workspace_dir=session_dir,
             venv_bin="/tmp/venv/bin",
             publish=lambda *a, **kw: None,
         )

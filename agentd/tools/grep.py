@@ -9,7 +9,7 @@ import re
 from typing import Any
 
 from tools.base import BaseTool, ToolContext
-from workspace.manager import validate_path, validate_path_dual
+from workspace.manager import validate_path
 
 _MAX_RESULTS = 100
 _MAX_FILE_SIZE = 1_000_000  # 1MB — skip binary / huge files
@@ -88,14 +88,14 @@ class GrepTool(BaseTool):
             return {"output": f"Invalid regex: {e}", "is_error": True}
 
         try:
-            abs_path = validate_path_dual(ctx.session_dir, ctx.parent_session_dir, path)
+            abs_path = validate_path(ctx.workspace_dir, path)
         except PermissionError as e:
             return {"output": str(e), "is_error": True}
 
         results: list[str] = []
 
         if os.path.isfile(abs_path):
-            _search_file(abs_path, regex, ctx.session_dir, results)
+            _search_file(abs_path, regex, ctx.workspace_dir, results)
         elif os.path.isdir(abs_path):
             import fnmatch
             for dirpath, dirnames, filenames in os.walk(abs_path):
@@ -106,7 +106,7 @@ class GrepTool(BaseTool):
                     if not _is_text_file(filename):
                         continue
                     full = os.path.join(dirpath, filename)
-                    _search_file(full, regex, ctx.session_dir, results)
+                    _search_file(full, regex, ctx.workspace_dir, results)
                     if len(results) >= _MAX_RESULTS:
                         break
                 if len(results) >= _MAX_RESULTS:

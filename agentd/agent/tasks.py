@@ -191,3 +191,17 @@ def read_task_stdout(
     with open(path, "r", errors="replace") as f:
         lines = f.readlines()
     return "".join(lines[-tail_lines:])
+
+
+def read_task_stderr(
+    session_dir: str,
+    task_id: str,
+    tail_lines: int = 100,
+) -> str:
+    """Read the last N lines of stderr.log."""
+    path = os.path.join(get_task_dir(session_dir, task_id), "stderr.log")
+    if not os.path.isfile(path):
+        return ""
+    with open(path, "r", errors="replace") as f:
+        lines = f.readlines()
+    return "".join(lines[-tail_lines:])

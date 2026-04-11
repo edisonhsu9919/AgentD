@@ -54,7 +54,7 @@ class FileWriteTool(BaseTool):
             return {"output": "Access denied: path points to internal system directory", "is_error": True}
 
         try:
-            abs_path = validate_path(ctx.session_dir, path)
+            abs_path = validate_path(ctx.workspace_dir, path)
         except PermissionError as e:
             return {"output": str(e), "is_error": True}
 

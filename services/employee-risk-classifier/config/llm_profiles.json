@@ -1,0 +1,25 @@
+{
+  "active_profile": "agentd-fallback",
+  "profiles": {
+    "default": {
+      "provider": "openai",
+      "api_key": "sk-cp-gz6mSL39QjLKSpIbMxVkr346M0qhClI4C3wf2ny97RdbfgN1Qslk6pra0rRt2jexm1SjXOe5FsqRBkXRpJlrcL1J3VZ-k4-A0peaZotjnjpw1K_EI6_yYe0",
+      "base_url": "https://api.minimaxi.com/v1",
+      "model": "MiniMax-M2.5",
+      "temperature": 0.1,
+      "max_tokens": 512,
+      "timeout": 60,
+      "extra_params": null
+    },
+    "agentd-fallback": {
+      "provider": "openai",
+      "api_key": "sk-cp-gz6mSL39QjLKSpIbMxVkr346M0qhClI4C3wf2ny97RdbfgN1Qslk6pra0rRt2jexm1SjXOe5FsqRBkXRpJlrcL1J3VZ-k4-A0peaZotjnjpw1K_EI6_yYe0",
+      "base_url": "https://api.minimaxi.com/v1",
+      "model": "MiniMax-M2.5",
+      "temperature": 0.1,
+      "max_tokens": 512,
+      "timeout": 60,
+      "extra_params": null
+    }
+  }
+}

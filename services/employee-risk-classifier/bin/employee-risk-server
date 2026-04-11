@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+#
+# employee-risk-server: 启动 API 服务器 (独立模式)
+#
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+SERVICE_DIR="$(dirname "$DIR")"
+
+VENV_PYTHON="$SERVICE_DIR/.venv/bin/python"
+
+if [ ! -f "$VENV_PYTHON" ]; then
+    echo "Error: Virtual environment not found at $VENV_PYTHON." >&2
+    echo "Please create the service .venv first." >&2
+    exit 1
+fi
+
+export PYTHONPATH="$SERVICE_DIR"
+cd "$SERVICE_DIR"
+
+exec "$VENV_PYTHON" "$SERVICE_DIR/main.py" server

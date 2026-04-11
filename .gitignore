@@ -72,3 +72,13 @@ AgentD-Design-Reference/
 
 # Research notes (local only)
 research/
+
+# CLI service registry — local runtime truth with absolute paths (use cli_registry.example.json as template)
+agentd/cli_registry.json
+
+# Local skill package staging artifacts (root-level)
+/employee-risk-skill-package/
+/pdf-rename-skill-package/
+
+# Frontend build output for external sample services
+services/**/dist/

@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -28,6 +29,10 @@ class Session(Base):
         nullable=True,
     )
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="idle")
+    interrupt_requested_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        doc="Non-null = abort requested; running worker checks this at tool boundaries (Phase 7A)",
+    )
     token_usage: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=lambda: {"input": 0, "output": 0, "total": 0}
     )

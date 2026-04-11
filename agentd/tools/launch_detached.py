@@ -16,6 +16,7 @@ import os
 import uuid
 from typing import Any
 
+from agent.runtime_env import resolve_command_execution
 from tools.base import BaseTool, ToolContext, ToolMetadata
 from workspace.manager import is_internal_path, validate_path
 
@@ -81,18 +82,53 @@ class LaunchDetachedProcessTool(BaseTool):
         command: str = kwargs["command"]
         cwd: str = kwargs.get("cwd", "")
 
+        from core.cli_registry import registry
+        from tools.bash import _has_outside_paths, _is_blacklisted
+
+        resolved_cmd, svc = registry.resolve_command(command)
+
+        # Blacklist check
+        if _is_blacklisted(resolved_cmd):
+            return {"output": "permission_denied: command matches blacklist", "is_error": True}
+
+        # Workspace path restriction (§7.3)
+        if svc:
+            if not svc.supports_detached:
+                return {"output": f"permission_denied: CLI service '{svc.name}' does not support detached mode", "is_error": True}
+            import shlex
+            try:
+                parts = shlex.split(command)
+                args_str = command[command.find(parts[0]) + len(parts[0]):]
+            except Exception:
+                args_str = command
+            if _has_outside_paths(args_str, ctx.workspace_dir):
+                return {"output": "permission_denied: service arguments reference paths outside workspace", "is_error": True}
+        else:
+            if _has_outside_paths(resolved_cmd, ctx.workspace_dir):
+                return {"output": "permission_denied: command references paths outside workspace", "is_error": True}
+
         # Resolve working directory
         if cwd:
             if is_internal_path(cwd):
                 return {"output": "Access denied: path points to internal system directory", "is_error": True}
             try:
-                abs_cwd = validate_path(ctx.session_dir, cwd)
+                abs_cwd = validate_path(ctx.workspace_dir, cwd)
             except PermissionError as e:
                 return {"output": str(e), "is_error": True}
             if not os.path.isdir(abs_cwd):
                 return {"output": f"Working directory not found: {cwd}", "is_error": True}
         else:
-            abs_cwd = ctx.session_dir
+            if svc and svc.cwd_policy == "entrypoint_dir":
+                abs_cwd = os.path.dirname(svc.entrypoint)
+            else:
+                abs_cwd = ctx.workspace_dir
+
+        execution = resolve_command_execution(
+            ctx,
+            resolved_cmd,
+            service=svc,
+            workdir=abs_cwd,
+        )
 
         # Generate task ID
         task_id = str(uuid.uuid4())
@@ -110,6 +146,7 @@ class LaunchDetachedProcessTool(BaseTool):
             title=title,
             command=command,
             spawned_by_tool=self.name,
+            extra=execution.as_metadata(),
         )
 
         # Create DB record
@@ -131,12 +168,13 @@ class LaunchDetachedProcessTool(BaseTool):
             env["AGENTD_SESSION_DIR"] = ctx.session_dir
             env["AGENTD_SESSION_ID"] = ctx.session_id
             env["AGENTD_USER_ID"] = ctx.user_id
+            env = execution.build_process_env(env)
 
             process = await asyncio.create_subprocess_shell(
-                command,
+                resolved_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=abs_cwd,
+                cwd=execution.workdir,
                 env=env,
             )
         except Exception as e:
@@ -239,6 +277,8 @@ async def _monitor_process(
         except Exception:
             pass
 
+    streams_done = asyncio.Event()
+
     # Stream stdout and stderr concurrently
     async def _stream_to_file(stream, filepath):
         with open(filepath, "ab") as f:
@@ -256,7 +296,7 @@ async def _monitor_process(
         task_dir = os.path.dirname(stdout_path)
         panel_path = os.path.join(task_dir, "panel_content.json")
         pushed = False
-        while not pushed:
+        while not pushed and not streams_done.is_set():
             await asyncio.sleep(2)
             if os.path.isfile(panel_path):
                 try:
@@ -273,13 +313,35 @@ async def _monitor_process(
                 except Exception as e:
                     logger.warning("Failed to push panel_content: %s", e)
                     pushed = True  # Don't retry endlessly
+        
+        # Final check in case it was written right before streams finished
+        if not pushed and os.path.isfile(panel_path):
+            try:
+                with open(panel_path, "r", encoding="utf-8") as f:
+                    panel_data = _json.load(f)
+                if publish:
+                    await publish(session_id, {
+                        "event": "panel_update",
+                        "panel_type": "html_app",
+                        "panel_content": panel_data,
+                    })
+                    logger.info("Pushed panel_content for task %s on final check", task_id)
+            except Exception:
+                pass
+
+    async def _run_streams():
+        """Run streams and signal completion."""
+        await asyncio.gather(
+            _stream_to_file(process.stdout, stdout_path),
+            _stream_to_file(process.stderr, stderr_path)
+        )
+        streams_done.set()
 
     timed_out = False
     try:
         await asyncio.wait_for(
             asyncio.gather(
-                _stream_to_file(process.stdout, stdout_path),
-                _stream_to_file(process.stderr, stderr_path),
+                _run_streams(),
                 _monitor_panel_content(),
             ),
             timeout=_MAX_RUNTIME_SECONDS,

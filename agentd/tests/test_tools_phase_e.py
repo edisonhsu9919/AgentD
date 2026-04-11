@@ -41,6 +41,7 @@ def ctx(workspace):
         session_id="test-session",
         user_root=str(workspace),
         session_dir=str(workspace),
+        workspace_dir=str(workspace),
         venv_bin=str(workspace / ".venv" / "bin"),
         publish=None,
     )

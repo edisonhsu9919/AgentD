@@ -9,8 +9,7 @@ import os
 from typing import Any
 
 from tools.base import BaseTool, ToolContext
-from workspace.manager import validate_path, validate_path_dual
-
+from workspace.manager import validate_path
 _MAX_RESULTS = 200
 
 
@@ -62,7 +61,7 @@ class GlobTool(BaseTool):
         path: str = kwargs.get("path") or "."
 
         try:
-            abs_path = validate_path_dual(ctx.session_dir, ctx.parent_session_dir, path)
+            abs_path = validate_path(ctx.workspace_dir, path)
         except PermissionError as e:
             return {"output": str(e), "is_error": True}
 
@@ -76,8 +75,9 @@ class GlobTool(BaseTool):
 
         # Return relative paths from the search root
         rel_matches = []
+        display_root = os.path.realpath(ctx.workspace_dir)
         for m in matches[:_MAX_RESULTS]:
-            rel = os.path.relpath(m, ctx.session_dir)
+            rel = os.path.relpath(os.path.realpath(m), display_root)
             rel_matches.append(rel)
 
         output = "\n".join(sorted(rel_matches))

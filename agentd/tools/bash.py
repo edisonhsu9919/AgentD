@@ -3,8 +3,8 @@ import os
 import re
 from typing import Any
 
+from agent.runtime_env import resolve_command_execution
 from tools.base import BaseTool, ToolContext
-from skills.env import resolve_env_for_command
 
 _TIMEOUT = 60  # seconds
 _MAX_OUTPUT = 8000  # characters
@@ -94,27 +94,48 @@ class BashTool(BaseTool):
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
         command: str = kwargs["command"]
 
+        from core.cli_registry import registry
+        resolved_cmd, svc = registry.resolve_command(command)
+
         # Blacklist check → immediate deny, no permission flow
-        if _is_blacklisted(command):
+        if _is_blacklisted(resolved_cmd):
             return {"output": "permission_denied: command matches blacklist", "is_error": True}
 
-        # Workspace path restriction (§7.3) — reject commands referencing paths outside workspace
-        if _has_outside_paths(command, ctx.session_dir):
-            return {"output": "permission_denied: command references paths outside workspace", "is_error": True}
+        # Workspace path restriction (§7.3)
+        if svc:
+            # For managed CLI services, only check arguments for outside paths
+            # to allow the absolute entrypoint path
+            import shlex
+            try:
+                parts = shlex.split(command)
+                args_str = command[command.find(parts[0]) + len(parts[0]):]
+            except Exception:
+                args_str = command
+            if _has_outside_paths(args_str, ctx.workspace_dir):
+                return {"output": "permission_denied: service arguments reference paths outside workspace", "is_error": True}
+        else:
+            if _has_outside_paths(resolved_cmd, ctx.workspace_dir):
+                return {"output": "permission_denied: command references paths outside workspace", "is_error": True}
 
-        # Per-call env resolution (Phase M4-D)
-        effective_bin = resolve_env_for_command(
-            ctx.session_dir, command, ctx.venv_bin,
+        execution = resolve_command_execution(
+            ctx,
+            resolved_cmd,
+            service=svc,
+            workdir=(
+                os.path.dirname(svc.entrypoint)
+                if svc and svc.cwd_policy == "entrypoint_dir"
+                else ctx.workspace_dir
+            ),
         )
-        env_prefix = f'export PATH="{effective_bin}:$PATH" && '
-        full_cmd = env_prefix + command
 
         try:
+            env = execution.build_process_env()
             proc = await asyncio.create_subprocess_shell(
-                full_cmd,
+                resolved_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                cwd=ctx.session_dir,
+                cwd=execution.workdir,
+                env=env,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_TIMEOUT)
             output = stdout.decode(errors="replace")

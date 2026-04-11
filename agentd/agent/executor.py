@@ -34,6 +34,13 @@ PublishFn = Callable[[str, dict], Coroutine[Any, Any, None]]
 AbortCheckFn = Callable[[], Coroutine[Any, Any, bool]]
 
 
+_SUBTASK_CONTINUATION_MARKER = "[Subtask Continuation - internal only]"
+_SUBTASK_RESULT_BRIDGE_KIND = "subtask_result_bridge"
+_SUBTASK_CONTINUATION_PROMPT = (
+    "Continue from the bridged subtask result already present in the conversation."
+)
+
+
 async def execute_start(
     session_id: str,
     user_id: str,
@@ -47,25 +54,32 @@ async def execute_start(
     tool_profile: str | None = None,
     is_subtask_continuation: bool = False,
     parent_session_dir: str | None = None,
+    allowed_tools: list[str] | None = None,
+    run_id: str | None = None,
 ) -> None:
     """Execute a 'start' run: build agent, stream, handle interrupts, finalize."""
     agent = await build_agent(
         session_id, user_id, user_root, session_dir, agent_id, model_id,
         tool_profile=tool_profile,
         parent_session_dir=parent_session_dir,
+        allowed_tools=allowed_tools,
+        run_id=run_id,
     )
     config = {"configurable": {"thread_id": session_id}}
 
     if is_subtask_continuation:
-        # Subtask bridge: the subtask_result assistant message is already
-        # persisted to the DB. Inject the child result as a SystemMessage
-        # so the model sees it in context, but _persist_messages will skip
-        # it (SystemMessages are filtered out), preventing a duplicate
-        # "user" message from appearing in the chat.
+        # Subtask bridge: inject the child result as assistant semantics,
+        # then add a tiny internal continuation nudge as a HumanMessage.
+        # This keeps the bridged result out of system-role history while
+        # avoiding a fake user bubble in persisted messages.
         initial_input = {"messages": [
-            SystemMessage(content=(
-                "[Subtask Result — do not treat as user input]\n\n"
-                + user_message
+            AIMessage(
+                content=user_message,
+                additional_kwargs={"agentd_internal": _SUBTASK_RESULT_BRIDGE_KIND},
+            ),
+            HumanMessage(content=(
+                _SUBTASK_CONTINUATION_MARKER + "\n\n"
+                + _SUBTASK_CONTINUATION_PROMPT
             )),
         ]}
     else:
@@ -81,6 +95,7 @@ async def execute_resume(
     decisions: list[dict],
     publish: PublishFn,
     check_abort: Optional[AbortCheckFn] = None,
+    run_id: str | None = None,
 ) -> None:
     """Execute a 'resume' run: rebuild agent from DB, resume graph with decisions.
 
@@ -94,6 +109,7 @@ async def execute_resume(
     # Rebuild agent from session metadata
     async with AsyncSessionLocal() as db:
         from auth.models import User
+        from agent.child_session import read_child_session_meta
         from workspace.manager import get_session_dir
 
         sid = uuid.UUID(session_id)
@@ -104,6 +120,17 @@ async def execute_resume(
         user_root = user.workspace if user else settings.workspace_root
         session_dir = get_session_dir(user_root, session_id)
 
+        parent_session_dir = None
+        allowed_tools = None
+        if session.parent_id:
+            parent_session_dir = get_session_dir(user_root, str(session.parent_id))
+            child_meta = read_child_session_meta(session_dir)
+            allowed_tools = (
+                child_meta.get("resolved_tools")
+                or child_meta.get("allowed_tools")
+                or None
+            )
+
     agent = await build_agent(
         session_id=session_id,
         user_id=str(session.user_id),
@@ -111,6 +138,10 @@ async def execute_resume(
         session_dir=session_dir,
         agent_id=session.agent_id,
         model_id=session.model_id,
+        tool_profile="child" if session.parent_id else None,
+        parent_session_dir=parent_session_dir,
+        allowed_tools=allowed_tools,
+        run_id=run_id,
     )
     config = {"configurable": {"thread_id": session_id}}
 
@@ -159,7 +190,10 @@ async def _execute_graph(
     """
     # Phase 6: reset per-run tool dedup counter
     from tools.registry import reset_tool_call_counter
+    from tools.knowledge_routing import reset_knowledge_route_state
+
     reset_tool_call_counter(session_id)
+    reset_knowledge_route_state(getattr(agent, "_run_id", "") or session_id)
 
     # Phase L: write initial diagnostics early (prompt layer sizes only).
     # If the run fails before _finalize/_handle_interrupt, at least the
@@ -976,6 +1010,12 @@ async def _persist_messages(session_id: str, messages: list) -> None:
             for msg in messages[1:]:
                 if isinstance(msg, SystemMessage):
                     continue
+                if isinstance(msg, AIMessage) and \
+                   getattr(msg, "additional_kwargs", {}).get("agentd_internal") == _SUBTASK_RESULT_BRIDGE_KIND:
+                    continue
+                if isinstance(msg, HumanMessage) and \
+                   _SUBTASK_CONTINUATION_MARKER in (msg.content or ""):
+                    continue
                 persistable.append(msg)
 
             skip = max(existing_count - 1, 0)
@@ -990,7 +1030,8 @@ async def _persist_messages(session_id: str, messages: list) -> None:
                 last_user_idx = -1
                 for j in range(len(persistable) - 1, -1, -1):
                     if isinstance(persistable[j], HumanMessage) and \
-                       "[Context Summary]" not in (persistable[j].content or ""):
+                       "[Context Summary]" not in (persistable[j].content or "") and \
+                       _SUBTASK_CONTINUATION_MARKER not in (persistable[j].content or ""):
                         last_user_idx = j
                         break
                 if last_user_idx >= 0:

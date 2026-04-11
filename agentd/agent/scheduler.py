@@ -259,3 +259,125 @@ async def cancel_queued_runs(db: AsyncSession, session_id: uuid.UUID) -> int:
     )
     await db.flush()
     return result.rowcount
+
+
+# ── Concurrent claim (Phase 7A) ─────────────────────────────────────────
+
+
+async def claim_run_concurrent(
+    db: AsyncSession,
+    worker_id: str,
+    lease_seconds: int = DEFAULT_LEASE_SECONDS,
+    local_exclude: set[uuid.UUID] | None = None,
+) -> Optional[AgentRun]:
+    """Claim the oldest queued run with global session-level exclusion.
+
+    Two-layer exclusion to prevent checkpoint write conflicts:
+    1. DB layer: skip sessions that already have a claimed/running run
+       — prevents cross-worker concurrent execution of the same session
+    2. Memory layer (local_exclude): skip sessions active in this worker
+       — fast-path to avoid unnecessary DB round-trips
+
+    This is the concurrent-mode replacement for claim_run().
+    The original claim_run() is preserved for backward compatibility.
+    """
+    now = datetime.now(timezone.utc)
+    lease_until = now + timedelta(seconds=lease_seconds)
+
+    from session.models import Session
+
+    # Subquery: session_ids that already have an active (claimed/running) run
+    active_sessions_subq = (
+        select(AgentRun.session_id)
+        .where(AgentRun.status.in_(["claimed", "running"]))
+        .distinct()
+        .scalar_subquery()
+    )
+
+    # By joining the Session table, with_for_update() locks BOTH the AgentRun and
+    # the Session row. Because we use skip_locked=True, if another worker is
+    # currently claiming a run for Session S, it holds the lock on the Session S row,
+    # causing this query to entirely skip any queued runs for Session S instead of
+    # just skipping the specific AgentRun row. This guarantees cross-worker
+    # same-session exclusion.
+    stmt = (
+        select(AgentRun)
+        .join(Session, AgentRun.session_id == Session.id)
+        .where(AgentRun.status == "queued")
+        .where(AgentRun.session_id.notin_(active_sessions_subq))
+        .order_by(AgentRun.created_at.asc())
+        .limit(1)
+        .with_for_update(skip_locked=True)
+    )
+
+    # Memory-layer fast-path exclusion
+    if local_exclude:
+        stmt = stmt.where(AgentRun.session_id.notin_(local_exclude))
+
+    result = await db.execute(stmt)
+    run = result.scalar_one_or_none()
+
+    if run is None:
+        return None
+
+    run.status = "claimed"
+    run.worker_id = worker_id
+    run.lease_expires_at = lease_until
+    run.updated_at = now
+    await db.flush()
+    return run
+
+
+# ── Session-level interrupt (Phase 7A) ───────────────────────────────────
+
+
+async def request_interrupt(db: AsyncSession, session_id: uuid.UUID) -> None:
+    """Set session-level interrupt flag.
+
+    Running worker checks this at each tool boundary via is_interrupted().
+    Replaces the old "enqueue abort run" pattern for cross-worker signalling.
+    """
+    from session.models import Session
+
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        sql_update(Session)
+        .where(Session.id == session_id)
+        .values(interrupt_requested_at=now, updated_at=now)
+    )
+    await db.flush()
+
+
+async def clear_interrupt(db: AsyncSession, session_id: uuid.UUID) -> None:
+    """Clear session interrupt flag after abort is processed."""
+    from session.models import Session
+
+    await db.execute(
+        sql_update(Session)
+        .where(Session.id == session_id)
+        .values(interrupt_requested_at=None)
+    )
+    await db.flush()
+
+
+async def is_interrupted(db: AsyncSession, session_id: uuid.UUID) -> bool:
+    """Check if session has a pending interrupt.
+
+    Used by the concurrent worker's abort checker at each tool boundary.
+    Also falls back to checking queued abort runs for backward compatibility
+    with the old single-run worker model.
+    """
+    from session.models import Session
+
+    # Primary: session-level interrupt flag
+    result = await db.execute(
+        select(Session.interrupt_requested_at)
+        .where(Session.id == session_id)
+    )
+    row = result.first()
+    if row is not None and row[0] is not None:
+        return True
+
+    # Fallback: legacy queued abort run (backward compat)
+    return await has_pending_abort(db, session_id)
+

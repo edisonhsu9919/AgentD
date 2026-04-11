@@ -10,6 +10,7 @@ Covers:
 - Worker publish fallback logic
 """
 
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -238,6 +239,72 @@ class TestWorkerInit:
         assert w._shutdown is True
 
 
+class TestWorkerFailureHandling:
+    @pytest.mark.asyncio
+    async def test_subtask_continuation_failure_restores_idle(self):
+        from agent.worker import AgentWorker
+
+        worker = AgentWorker(worker_id="test-worker")
+        worker._execute_start = AsyncMock(side_effect=RuntimeError("boom"))
+        worker._bridge_child_failure = AsyncMock()
+        worker._publish = AsyncMock()
+
+        db = AsyncMock()
+        session_ctx = AsyncMock()
+        session_ctx.__aenter__.return_value = db
+        session_ctx.__aexit__.return_value = False
+
+        with (
+            patch("agent.worker.AsyncSessionLocal", return_value=session_ctx),
+            patch("agent.worker.scheduler.mark_failed", new=AsyncMock()),
+            patch("agent.executor._update_db_status", new=AsyncMock()) as mock_update_status,
+        ):
+            await worker._execute_run(
+                uuid.uuid4(),
+                str(uuid.uuid4()),
+                "start",
+                {"is_subtask_continuation": True},
+            )
+
+        mock_update_status.assert_awaited_once_with(mock_update_status.await_args.args[0], "idle")
+        status_event = worker._publish.await_args_list[0].args[1]
+        error_event = worker._publish.await_args_list[1].args[1]
+        assert status_event == {"event": "status_change", "status": "idle"}
+        assert error_event["code"] == "subtask_continuation_error"
+
+    @pytest.mark.asyncio
+    async def test_regular_failure_still_marks_error(self):
+        from agent.worker import AgentWorker
+
+        worker = AgentWorker(worker_id="test-worker")
+        worker._execute_start = AsyncMock(side_effect=RuntimeError("boom"))
+        worker._bridge_child_failure = AsyncMock()
+        worker._publish = AsyncMock()
+
+        db = AsyncMock()
+        session_ctx = AsyncMock()
+        session_ctx.__aenter__.return_value = db
+        session_ctx.__aexit__.return_value = False
+
+        with (
+            patch("agent.worker.AsyncSessionLocal", return_value=session_ctx),
+            patch("agent.worker.scheduler.mark_failed", new=AsyncMock()),
+            patch("agent.executor._update_db_status", new=AsyncMock()) as mock_update_status,
+        ):
+            await worker._execute_run(
+                uuid.uuid4(),
+                str(uuid.uuid4()),
+                "start",
+                {},
+            )
+
+        mock_update_status.assert_awaited_once_with(mock_update_status.await_args.args[0], "error")
+        status_event = worker._publish.await_args_list[0].args[1]
+        error_event = worker._publish.await_args_list[1].args[1]
+        assert status_event == {"event": "status_change", "status": "error"}
+        assert error_event["code"] == "worker_error"
+
+
 # ── Unit tests: Executor module separation ────────────────────────────────
 
 
@@ -252,6 +319,129 @@ class TestExecutorModuleExists:
         assert _is_tool_error(MagicMock(status="error")) is True
         assert _is_tool_error(MagicMock(status="ok", additional_kwargs={})) is False
         assert _extract_token_usage([]) == {"input": 0, "output": 0, "total": 0}
+
+    @pytest.mark.asyncio
+    async def test_execute_start_subtask_continuation_uses_internal_human_message(self):
+        from langchain_core.messages import AIMessage, HumanMessage
+        from agent.executor import (
+            _SUBTASK_CONTINUATION_MARKER,
+            _SUBTASK_CONTINUATION_PROMPT,
+            _SUBTASK_RESULT_BRIDGE_KIND,
+            execute_start,
+        )
+
+        with (
+            patch("agent.executor.build_agent", new=AsyncMock(return_value=MagicMock())),
+            patch("agent.executor._execute_graph", new=AsyncMock()) as mock_execute_graph,
+        ):
+            await execute_start(
+                session_id=str(uuid.uuid4()),
+                user_id=str(uuid.uuid4()),
+                user_root="/tmp/user",
+                session_dir="/tmp/user/sessions/s1",
+                agent_id="build",
+                model_id="test-model",
+                user_message="[Sub-task completed]\nsummary",
+                publish=AsyncMock(),
+                is_subtask_continuation=True,
+            )
+
+        initial_input = mock_execute_graph.await_args.args[1]
+        bridged_msg = initial_input["messages"][0]
+        prompt_msg = initial_input["messages"][1]
+        assert isinstance(bridged_msg, AIMessage)
+        assert bridged_msg.additional_kwargs["agentd_internal"] == _SUBTASK_RESULT_BRIDGE_KIND
+        assert isinstance(prompt_msg, HumanMessage)
+        assert _SUBTASK_CONTINUATION_MARKER in prompt_msg.content
+        assert _SUBTASK_CONTINUATION_PROMPT in prompt_msg.content
+
+    @pytest.mark.asyncio
+    async def test_persist_messages_skips_internal_subtask_continuation_messages(self):
+        from langchain_core.messages import HumanMessage, AIMessage
+        from agent.executor import (
+            _SUBTASK_RESULT_BRIDGE_KIND,
+            _persist_messages,
+        )
+
+        db = AsyncMock()
+        session_ctx = AsyncMock()
+        session_ctx.__aenter__.return_value = db
+        session_ctx.__aexit__.return_value = False
+
+        with (
+            patch("agent.executor.AsyncSessionLocal", return_value=session_ctx),
+            patch("agent.executor.session_svc.count_messages", new=AsyncMock(return_value=0)),
+            patch("agent.executor.session_svc.create_message", new=AsyncMock()) as mock_create_message,
+        ):
+            await _persist_messages(
+                str(uuid.uuid4()),
+                [
+                    MagicMock(),
+                    AIMessage(
+                        content="[Sub-task completed]\nsummary",
+                        additional_kwargs={"agentd_internal": _SUBTASK_RESULT_BRIDGE_KIND},
+                    ),
+                    HumanMessage(content="[Subtask Continuation - internal only]\n\ncarry on"),
+                    AIMessage(content="done"),
+                ],
+            )
+
+        roles = [call.kwargs["role"] for call in mock_create_message.await_args_list]
+        assert roles == ["assistant"]
+
+    @pytest.mark.asyncio
+    async def test_execute_resume_child_restores_allowed_tools_from_child_meta(self, tmp_path):
+        from agent.child_session import write_child_session_meta
+        from agent.executor import execute_resume
+        from workspace.manager import ensure_user_root, get_session_dir
+
+        user_root = os.path.join(str(tmp_path), "user")
+        ensure_user_root(user_root)
+
+        session_id = str(uuid.uuid4())
+        parent_id = str(uuid.uuid4())
+        session_dir = get_session_dir(user_root, session_id)
+        write_child_session_meta(
+            session_dir,
+            parent_session_id=parent_id,
+            parent_session_dir=get_session_dir(user_root, parent_id),
+            allowed_tools=["file_write", "bash"],
+            resolved_tools=["bash", "file_write"],
+        )
+
+        user_id = uuid.uuid4()
+        session = MagicMock(
+            user_id=user_id,
+            parent_id=uuid.UUID(parent_id),
+            agent_id="build",
+            model_id="test-model",
+        )
+        user = MagicMock(workspace=user_root)
+
+        db = AsyncMock()
+        db.get = AsyncMock(return_value=user)
+        session_ctx = AsyncMock()
+        session_ctx.__aenter__.return_value = db
+        session_ctx.__aexit__.return_value = False
+
+        agent = MagicMock()
+        agent.aget_state = AsyncMock(return_value=MagicMock(interrupts=[]))
+
+        with (
+            patch("agent.executor.AsyncSessionLocal", return_value=session_ctx),
+            patch("agent.executor.session_svc.get_session", new=AsyncMock(return_value=session)),
+            patch("agent.executor.build_agent", new=AsyncMock(return_value=agent)) as mock_build_agent,
+            patch("agent.executor._execute_graph", new=AsyncMock()) as mock_execute_graph,
+        ):
+            await execute_resume(
+                session_id=session_id,
+                decisions=[],
+                publish=AsyncMock(),
+            )
+
+        assert mock_build_agent.await_args.kwargs["tool_profile"] == "child"
+        assert mock_build_agent.await_args.kwargs["allowed_tools"] == ["bash", "file_write"]
+        assert mock_execute_graph.await_args.args[4] == session_dir
 
 
 # ── Unit tests: Runner compatibility shim ─────────────────────────────────
@@ -437,4 +627,4 @@ class TestStripThinkTags:
 class TestMigrationVersion:
     def test_expected_schema_version_updated(self):
         from main import EXPECTED_SCHEMA_VERSION
-        assert EXPECTED_SCHEMA_VERSION == "014"
+        assert EXPECTED_SCHEMA_VERSION == "015"

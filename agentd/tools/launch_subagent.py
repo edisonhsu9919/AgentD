@@ -8,7 +8,7 @@ high-level tool result.
 The child agent:
 - Shares the parent's static prompt layers
 - Runs with fsd permission mode (no user interrupts)
-- Gets a restricted tool set (read-only by default + explicit whitelist)
+- Inherits the parent's working tools except recursive control-plane tools
 - Cannot spawn further children or detached processes
 """
 
@@ -71,9 +71,9 @@ class LaunchSubagentTool(BaseTool):
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Extra tools beyond the default read-only set. "
-                        "Options: file_write, file_edit, bash, skill. "
-                        "Default: only read-only tools."
+                        "Optional narrowing list for the child toolset. "
+                        "If omitted, the child inherits the parent's tools "
+                        "except launch_subagent and launch_detached_process."
                     ),
                 },
             },
@@ -83,7 +83,7 @@ class LaunchSubagentTool(BaseTool):
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
         title: str = kwargs["title"]
         task_packet: str = kwargs["task_packet"]
-        allowed_tools: list[str] = kwargs.get("allowed_tools") or []
+        requested_tools: list[str] | None = kwargs.get("allowed_tools")
 
         # Guard: prevent duplicate child tasks in the same session
         already_waiting = await self._check_already_waiting(ctx.session_id)
@@ -99,6 +99,20 @@ class LaunchSubagentTool(BaseTool):
 
         task_id = str(uuid.uuid4())
 
+        resolved_tools = self._resolve_child_tools(requested_tools)
+        if requested_tools and not resolved_tools:
+            return {
+                "output": json.dumps({
+                    "status": "rejected",
+                    "reason": (
+                        "allowed_tools narrowed the child toolset to nothing usable. "
+                        "Choose a subset of the parent's tools excluding "
+                        "launch_subagent and launch_detached_process."
+                    ),
+                }),
+                "is_error": True,
+            }
+
         # Initialize task filesystem
         from agent.tasks import init_task_dir, write_task_meta
         init_task_dir(ctx.session_dir, task_id)
@@ -106,7 +120,7 @@ class LaunchSubagentTool(BaseTool):
         # Create child session
         try:
             child_session_id, child_model_id = await self._create_child_session(
-                ctx, task_id, title, task_packet, allowed_tools,
+                ctx, task_id, title, task_packet,
             )
         except Exception as e:
             logger.error("Failed to create child session: %s", e)
@@ -146,7 +160,12 @@ class LaunchSubagentTool(BaseTool):
         # Enqueue the child session run
         try:
             run_id = await self._enqueue_child_run(
-                ctx, child_session_id, task_packet, allowed_tools, child_model_id,
+                ctx,
+                child_session_id,
+                task_packet,
+                requested_tools or [],
+                resolved_tools,
+                child_model_id,
             )
         except Exception as e:
             logger.error("Failed to enqueue child run: %s", e)
@@ -192,8 +211,24 @@ class LaunchSubagentTool(BaseTool):
                 f"Sub-task '{title}' started in child session. "
                 f"Waiting for it to complete..."
             ),
+            "resolved_tools": resolved_tools,
         }
         return {"output": json.dumps(result, ensure_ascii=False), "is_error": False}
+
+    def _resolve_child_tools(self, requested_tools: list[str] | None) -> list[str]:
+        from tools.registry import get_registry
+
+        registry = get_registry()
+        requested = {
+            name.strip()
+            for name in (requested_tools or [])
+            if isinstance(name, str) and name.strip()
+        }
+        resolved = registry.resolve_tool_names(
+            tool_profile="child",
+            allowed_tools=requested or None,
+        )
+        return sorted(resolved)
 
     async def _check_already_waiting(self, session_id: str) -> bool:
         """Check if this session already has a running child task."""
@@ -215,7 +250,6 @@ class LaunchSubagentTool(BaseTool):
         task_id: str,
         title: str,
         task_packet: str,
-        allowed_tools: list[str],
     ) -> tuple[str, str]:
         """Create a child session in DB.
 
@@ -276,7 +310,8 @@ class LaunchSubagentTool(BaseTool):
         ctx: ToolContext,
         child_session_id: str,
         task_packet: str,
-        allowed_tools: list[str],
+        requested_tools: list[str],
+        resolved_tools: list[str],
         model_id: str,
     ) -> uuid.UUID:
         """Enqueue an agent run for the child session.
@@ -286,12 +321,22 @@ class LaunchSubagentTool(BaseTool):
         Additionally: tool_profile and allowed_tools for child restriction.
         """
         from core.database import AsyncSessionLocal
+        from agent.child_session import write_child_session_meta
         from agent.scheduler import enqueue_start
+        from permission.policy import SessionPolicy, save_policy
         from session.models import Session
         from workspace.manager import get_session_dir
         from sqlalchemy import update as sa_update
 
         child_session_dir = get_session_dir(ctx.user_root, child_session_id)
+        write_child_session_meta(
+            child_session_dir,
+            parent_session_id=ctx.session_id,
+            parent_session_dir=ctx.session_dir,
+            allowed_tools=requested_tools,
+            resolved_tools=resolved_tools,
+        )
+        save_policy(child_session_dir, SessionPolicy(mode="fsd"))
 
         async with AsyncSessionLocal() as db:
             # Set child session to queued
@@ -311,7 +356,7 @@ class LaunchSubagentTool(BaseTool):
                     "agent_id": "build",
                     "model_id": model_id,
                     "tool_profile": "child",
-                    "allowed_tools": allowed_tools,
+                    "allowed_tools": resolved_tools,
                     "parent_session_dir": ctx.session_dir,
                 },
             )

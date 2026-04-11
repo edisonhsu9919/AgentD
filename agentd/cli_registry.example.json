@@ -1,0 +1,22 @@
+{
+  "_comment": "Copy this file to cli_registry.json and replace entrypoint paths with actual absolute paths on your deployment. cli_registry.json is gitignored — it is local runtime truth only.",
+  "services": [
+    {
+      "name": "employee-risk-cli",
+      "entrypoint": "/absolute/path/to/services/employee-risk-classifier/bin/employee-risk-cli",
+      "cwd_policy": "session_dir",
+      "env_kind": "isolated",
+      "supports_detached": true,
+      "is_enabled": true
+    },
+    {
+      "name": "pdf-rename-cli",
+      "entrypoint": "/absolute/path/to/services/pdf-rename-cli/bin/pdf-rename-cli",
+      "cwd_policy": "session_dir",
+      "env_kind": "isolated",
+      "supports_detached": true,
+      "owner_skill": "pdf-rename",
+      "is_enabled": true
+    }
+  ]
+}

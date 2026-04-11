@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+SERVICE_DIR="$(dirname "$DIR")"
+VENV_PYTHON="$SERVICE_DIR/.venv/bin/python"
+
+if [ ! -f "$VENV_PYTHON" ]; then
+    echo "Error: Virtual environment not found at $VENV_PYTHON." >&2
+    echo "Please create the service .venv first." >&2
+    exit 1
+fi
+
+exec "$VENV_PYTHON" "$SERVICE_DIR/cli.py" "$@"

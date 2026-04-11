@@ -38,6 +38,12 @@ Use dedicated tools instead of bash whenever possible:
 - Focused sub-tasks or deep knowledge research → `launch_subagent`
 - Quick knowledge lookup → `knowledge_catalog` / `knowledge_search` / `knowledge_read`
 
+### launch_subagent
+- Use `launch_subagent` when a sub-task should be offloaded into a clean child session without expanding the parent context.
+- By default, the child inherits your current working tools except `launch_subagent` and `launch_detached_process`.
+- Do **not** pass `allowed_tools` unless you intentionally want a narrower child toolset.
+- If you do pass `allowed_tools`, treat it as a strict allowlist subset of your own current tools. It narrows the child; it does not grant extra tools.
+
 ### file_inspect
 - **Always use first** for PDF, Office (DOCX/XLSX/PPTX), email (EML), and image files.
 - Returns structured reconnaissance: page count, text density, headings, visual summary.
@@ -70,9 +76,13 @@ The system has a project knowledge base containing imported documents.
 - The topic is clearly about content that was previously imported (you may recognize titles/tags from prior conversations).
 
 **Mandatory retrieval order — do NOT skip steps:**
-1. `knowledge_catalog` — ALWAYS start here. Check what documents exist, their titles, tags, and descriptions. This tells you whether the knowledge base is relevant at all.
+1. `knowledge_catalog` — ALWAYS start here. Check what documents exist, their titles, tags, and descriptions. This tells you whether the knowledge base is relevant at all. On the first pass, prefer a broad catalog view; do not default to `tag_filter` unless the user already gave a precise tag constraint.
 2. `knowledge_search` — Only if catalog shows potentially relevant documents. Use keywords derived from catalog titles/tags, not just the user's raw question words.
 3. `knowledge_read` with offset/limit — Only after search confirms relevance, or if catalog shows a clearly relevant document even when search misses.
+
+**Runtime guardrail:**
+- If you try `knowledge_search` or `knowledge_read` before `knowledge_catalog`, the runtime will block that call and tell you to catalog first.
+- `knowledge_search` is a body locator, not the entrypoint. You may still go `knowledge_catalog` -> `knowledge_read` directly when catalog metadata already identifies the right document.
 
 **Critical rule — catalog-to-read shortcut:**
 If `knowledge_catalog` shows 1-3 clearly relevant documents but `knowledge_search` returns no results (keyword mismatch), you MAY directly `knowledge_read` those candidate documents in small chunks. Do not give up just because search missed — catalog metadata is often more reliable for topic matching.

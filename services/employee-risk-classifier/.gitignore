@@ -1,0 +1,9 @@
+.venv
+logs/
+run/
+uploads/
+outputs/
+var/
+__pycache__/
+*.pyc
+.DS_Store
