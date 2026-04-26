@@ -59,7 +59,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       method: "POST",
       body: JSON.stringify({
         title: title || "New Session",
-        agent_id: "build",
+        agent_id: "assistant",
       }),
     });
     set((s) => ({ sessions: [session, ...s.sessions] }));
@@ -76,7 +76,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         method: "POST",
         body: JSON.stringify({
           title: title || "New Session",
-          agent_id: "build",
+          agent_id: "assistant",
         }),
       });
       set((s) => ({

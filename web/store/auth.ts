@@ -43,7 +43,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         isLoading: false,
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Login failed";
+      const msg =
+        err instanceof TypeError
+          ? "无法连接到 AgentD 服务，请确认前后端运行正常"
+          : err instanceof Error
+            ? err.message
+            : "登录失败";
       set({ isLoading: false, error: msg });
       throw err;
     }

@@ -8,7 +8,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.deps import require_admin
+from api.deps import get_current_user, require_admin
 from auth.models import User
 from core.database import get_db
 from core.response import ok, ok_list
@@ -24,6 +24,7 @@ from model_config.service import invalidate_provider_cache
 
 router = APIRouter()
 runtime_router = APIRouter()  # Mounted separately at /api/admin/runtime
+public_runtime_router = APIRouter()  # Mounted separately at /api/runtime
 
 
 @router.get("")
@@ -112,6 +113,23 @@ async def update_model_config(
     return ok(ModelConfigResponse.model_validate(updated).model_dump(mode="json"))
 
 
+@router.delete("/{config_id}")
+async def delete_model_config(
+    config_id: uuid.UUID,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    deleted = await mc_svc.delete_model_config(db, config_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Model config not found"},
+        )
+    await db.commit()
+    invalidate_provider_cache()
+    return ok({"deleted": True, "id": str(config_id)})
+
+
 @router.post("/{config_id}/enable")
 async def enable_model_config(
     config_id: uuid.UUID,
@@ -164,6 +182,23 @@ async def set_default_model_config(
     return ok(ModelConfigResponse.model_validate(mc).model_dump(mode="json"))
 
 
+@router.post("/{config_id}/unset-default")
+async def unset_default_model_config(
+    config_id: uuid.UUID,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    mc = await mc_svc.unset_default_model_config(db, config_id)
+    if not mc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Model config not found"},
+        )
+    await db.commit()
+    invalidate_provider_cache()
+    return ok(ModelConfigResponse.model_validate(mc).model_dump(mode="json"))
+
+
 # ── Runtime summary ──────────────────────────────────────────────────────────
 
 
@@ -173,6 +208,23 @@ async def get_runtime_model_config(
     db: AsyncSession = Depends(get_db),
 ):
     """Return the currently active model config and all available configs."""
+    return ok(await _build_runtime_model_config_payload(db, include_available=True))
+
+
+@public_runtime_router.get("/model-config")
+async def get_public_runtime_model_config(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the active LLM summary for authenticated workspace users."""
+    return ok(await _build_runtime_model_config_payload(db, include_available=False))
+
+
+async def _build_runtime_model_config_payload(
+    db: AsyncSession,
+    *,
+    include_available: bool,
+) -> dict:
     resolved = await mc_svc.resolve_active_model_config(db)
 
     active = {
@@ -186,24 +238,26 @@ async def get_runtime_model_config(
     if resolved.config_id:
         active["config_id"] = str(resolved.config_id)
 
-    configs = await mc_svc.list_model_configs(db)
-    available = [
-        {
-            "id": str(c.id),
-            "name": c.name,
-            "model_id": c.model_id,
-            "is_enabled": c.is_enabled,
-            "is_default": c.is_default,
-        }
-        for c in configs
-        if getattr(c, "model_type", "llm") == "llm"
-    ]
+    available = []
+    if include_available:
+        configs = await mc_svc.list_model_configs(db)
+        available = [
+            {
+                "id": str(c.id),
+                "name": c.name,
+                "model_id": c.model_id,
+                "is_enabled": c.is_enabled,
+                "is_default": c.is_default,
+            }
+            for c in configs
+            if getattr(c, "model_type", "llm") == "llm"
+        ]
 
-    return ok(RuntimeModelConfigResponse(
+    return RuntimeModelConfigResponse(
         source=resolved.source,
         active_config=active,
         available_configs=available,
-    ).model_dump(mode="json"))
+    ).model_dump(mode="json")
 
 
 @runtime_router.get("/vlm-config")
@@ -212,15 +266,28 @@ async def get_runtime_vlm_config(
     db: AsyncSession = Depends(get_db),
 ):
     """Return the currently active VLM config (or null if none)."""
+    return ok(await _build_runtime_vlm_config_payload(db))
+
+
+@public_runtime_router.get("/vlm-config")
+async def get_public_runtime_vlm_config(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the active VLM summary for authenticated workspace users."""
+    return ok(await _build_runtime_vlm_config_payload(db))
+
+
+async def _build_runtime_vlm_config_payload(db: AsyncSession) -> dict:
     resolved = await mc_svc.resolve_active_vlm_config(db)
 
     if resolved is None:
-        return ok({
+        return {
             "available": False,
             "source": None,
             "active_config": None,
             "message": "No VLM configured. Vision capabilities are unavailable.",
-        })
+        }
 
     active = {
         "source": resolved.source,
@@ -235,11 +302,11 @@ async def get_runtime_vlm_config(
     if resolved.config_id:
         active["config_id"] = str(resolved.config_id)
 
-    return ok({
+    return {
         "available": True,
         "source": resolved.source,
         "active_config": active,
-    })
+    }
 
 
 @runtime_router.get("/diagnostics")

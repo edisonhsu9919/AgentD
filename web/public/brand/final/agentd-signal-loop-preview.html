@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AgentD Signal Loop Mark</title>
+    <style>
+      :root {
+        --bg: #eff1f5;
+        --card: rgba(255, 255, 255, 0.94);
+        --border: #d9dce4;
+        --text: #17191f;
+        --muted: #6a6e79;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at top left, rgba(112, 92, 255, 0.14), transparent 22%),
+          linear-gradient(180deg, #fbfbfd 0%, var(--bg) 100%);
+      }
+
+      .wrap {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 56px 28px 84px;
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        font-size: clamp(40px, 7vw, 72px);
+        line-height: 0.95;
+        letter-spacing: -0.05em;
+      }
+
+      p {
+        max-width: 700px;
+        margin: 0 0 32px;
+        color: var(--muted);
+        line-height: 1.7;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+        gap: 24px;
+      }
+
+      .card {
+        padding: 24px;
+        border-radius: 28px;
+        border: 1px solid var(--border);
+        background: var(--card);
+        box-shadow: 0 22px 60px rgba(23, 25, 31, 0.06);
+      }
+
+      .canvas {
+        height: 280px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 24px;
+        border: 1px solid #ececf1;
+        background: #fbfbfd;
+      }
+
+      .canvas img {
+        width: 176px;
+        height: 176px;
+      }
+
+      .sizes {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        margin-top: 20px;
+      }
+
+      .sizes img:nth-child(1) { width: 20px; height: 20px; }
+      .sizes img:nth-child(2) { width: 28px; height: 28px; }
+      .sizes img:nth-child(3) { width: 40px; height: 40px; }
+      .sizes img:nth-child(4) { width: 56px; height: 56px; }
+
+      h2 {
+        margin: 18px 0 8px;
+        font-size: 20px;
+      }
+
+      .meta {
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.7;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <h1>AgentD Signal Loop</h1>
+      <p>
+        Selected from the duotone exploration as the current primary mark. This
+        version keeps the clean dual-form silhouette, uses the symbol exactly
+        in the selected left-purple right-black split, and pairs it with the final lowercase
+        wordmark: <strong>agent</strong> in graphite and <strong>d</strong> in
+        violet.
+      </p>
+
+      <section class="grid">
+        <article class="card">
+          <div class="canvas">
+            <img src="./agentd-signal-loop-lockup.svg" alt="AgentD Signal Loop logo lockup" style="width: 320px; height: auto;" />
+          </div>
+          <h2>Static Lockup</h2>
+          <div class="meta">Final static brand lockup for product chrome, login, sidebar, and admin surfaces.</div>
+          <div class="sizes">
+            <img src="./agentd-signal-loop-mark.svg" alt="" />
+            <img src="./agentd-signal-loop-mark.svg" alt="" />
+            <img src="./agentd-signal-loop-mark.svg" alt="" />
+            <img src="./agentd-signal-loop-mark.svg" alt="" />
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="canvas">
+            <img src="./agentd-signal-loop-motion-04-assemble.svg" alt="AgentD Signal Loop assemble motion" style="width: 320px; height: auto;" />
+          </div>
+          <h2>Assemble Motion</h2>
+          <div class="meta">Selected motion direction for reveal, loading, or focused running-state presentation.</div>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

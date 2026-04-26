@@ -4,8 +4,7 @@ import { useState, useMemo, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { FileText, ExternalLink, BookOpen } from "lucide-react";
 import { usePanelStore } from "@/store/panel";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import MessageMarkdown from "./MessageMarkdown";
 import type { SourceRefItem } from "@/lib/types";
 
 interface CitedTextBlockProps {
@@ -19,28 +18,21 @@ interface CitedTextBlockProps {
  * superscript badges, and sources are listed below the text with hover cards.
  */
 export default function CitedTextBlock({ text, sources }: CitedTextBlockProps) {
-  // Build citation index map: doc_id → 1-based number
-  const citationMap = useMemo(() => {
-    const map = new Map<string, number>();
-    sources.forEach((s, i) => map.set(s.doc_id, i + 1));
-    return map;
-  }, [sources]);
-
   // Replace [N] patterns with interactive superscript markers in the rendered output.
   // Since ReactMarkdown renders HTML, we inject custom components for citation marks.
   // Strategy: use a remark/rehype plugin or post-process. Simplest: custom component
   // that wraps ReactMarkdown and replaces [1], [2] etc with superscript spans.
 
   return (
-    <div>
+    <div className="space-y-3">
       {/* Text with inline citation marks */}
-      <div className="prose prose-invert prose-sm max-w-none">
+      <div className="chat-prose">
         <CitedMarkdown text={text} sourceCount={sources.length} sources={sources} />
       </div>
 
       {/* Source list — always visible, not collapsed */}
       {sources.length > 0 && (
-        <div className="mt-3 border-t border-border/30 pt-2">
+        <div className="pt-1">
           <div className="mb-1.5 flex items-center gap-1.5">
             <BookOpen size={11} className="text-accent" />
             <span className="text-[10px] font-medium text-text-secondary">
@@ -98,9 +90,7 @@ function CitedMarkdown({ text, sourceCount, sources }: { text: string; sourceCou
         part.type === "cite" ? (
           <InlineCiteBadge key={i} num={part.num} sources={sources} />
         ) : (
-          <ReactMarkdown key={i} remarkPlugins={[remarkGfm]}>
-            {part.content}
-          </ReactMarkdown>
+          <MessageMarkdown key={i}>{part.content}</MessageMarkdown>
         ),
       )}
     </>

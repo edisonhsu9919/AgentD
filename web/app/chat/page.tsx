@@ -14,11 +14,11 @@ import PermissionDialog from "@/components/permission/PermissionDialog";
 import WaitingRecoveryBanner from "@/components/permission/WaitingRecoveryBanner";
 import SessionStatusIndicator from "@/components/chat/SessionStatusIndicator";
 import TaskPlanPanel from "@/components/task-plan/TaskPlanPanel";
-import PolicySwitcher from "@/components/policy/PolicySwitcher";
-import ContextRingGauge from "@/components/chat/ContextRingGauge";
 import CompactBanner from "@/components/chat/CompactBanner";
 import PanelShell from "@/components/panel/PanelShell";
 import { usePanelStore } from "@/store/panel";
+import AgentDRunningMark from "@/components/brand/AgentDRunningMark";
+import { PanelRight } from "lucide-react";
 
 function ChatPageInner() {
   const router = useRouter();
@@ -41,11 +41,9 @@ function ChatPageInner() {
     fetchPolicy,
     fetchPendingPermissions,
     reset: resetChat,
-    setStatus,
   } = useChatStore();
   const pendingPermissions = useChatStore((s) => s.pendingPermissions);
   const chatStatus = useChatStore((s) => s.status);
-  const policy = useChatStore((s) => s.policy);
   const runtime = useChatStore((s) => s.runtime);
   const contextWarning = useChatStore((s) => s.contextWarning);
   const justCompacted = useChatStore((s) => s.justCompacted);
@@ -54,6 +52,8 @@ function ChatPageInner() {
 
   const clearPanel = usePanelStore((s) => s.clearPanel);
   const fetchTasks = usePanelStore((s) => s.fetchTasks);
+  const togglePanel = usePanelStore((s) => s.togglePanel);
+  const panelOpen = usePanelStore((s) => s.open);
 
   const fetchTaskPlan = useTaskPlanStore((s) => s.fetchTaskPlan);
   const clearTaskPlan = useTaskPlanStore((s) => s.clearTaskPlan);
@@ -188,20 +188,20 @@ function ChatPageInner() {
 
   // Status badge color + user-friendly labels
   const statusColor: Record<string, string> = {
-    idle: "bg-bg-tertiary text-text-secondary",
-    queued: "bg-yellow-500/20 text-yellow-400",
-    running: "bg-accent/20 text-accent",
-    waiting: "bg-yellow-500/20 text-yellow-500",
-    subtask_waiting: "bg-purple-500/20 text-purple-400",
-    error: "bg-danger/20 text-danger",
+    idle: "bg-bg-primary text-text-secondary",
+    queued: "bg-warning/80 text-warning-foreground",
+    running: "bg-accent/12 text-accent",
+    waiting: "bg-warning/80 text-warning-foreground",
+    subtask_waiting: "bg-purple-500/14 text-purple-500",
+    error: "bg-danger/12 text-danger",
   };
   const statusLabel: Record<string, string> = {
-    idle: "Idle",
-    queued: "Queued",
-    running: "Running",
-    waiting: "Waiting",
-    subtask_waiting: "Sub-task",
-    error: "Error",
+    idle: "待命",
+    queued: "排队中",
+    running: "执行中",
+    waiting: "待授权",
+    subtask_waiting: "等待子任务",
+    error: "异常",
   };
 
   const currentSession = sessions.find((s) => s.id === currentSessionId);
@@ -210,103 +210,122 @@ function ChatPageInner() {
   // background session-list refreshes must NOT unmount the chat area.
   if (!currentSessionId) {
     return (
-      <div className="flex flex-1 items-center justify-center text-text-secondary">
-        <div className="h-5 w-5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+      <div className="flex flex-1 items-center justify-center px-6">
+        <div className="surface-card flex w-full max-w-md flex-col items-center gap-4 px-8 py-10 text-center">
+          <AgentDRunningMark size={26} />
+          <div className="space-y-2">
+            <div className="font-caption text-[11px] tracking-[0.12em] text-text-secondary">
+              正在准备工作台
+            </div>
+            <p className="text-sm leading-7 text-text-secondary">
+              正在恢复会话与运行时状态，请稍候。
+            </p>
+          </div>
+        </div>
       </div>
     );
   }
 
+  const sessionTitle = stripThinkTags(currentSession?.title || "未命名会话");
+
   return (
-    <div className="flex min-w-0 flex-1">
-      {/* Chat column */}
-      <div className="flex min-w-0 flex-1 flex-col">
-        {/* Chat header */}
-        <div className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div className="flex items-center gap-3">
-            <h2 className="text-sm font-medium">
-              {stripThinkTags(currentSession?.title || "Session")}
-            </h2>
-            <span
-              className={`rounded px-1.5 py-0.5 text-xs ${statusColor[chatStatus] || statusColor.idle}`}
-            >
-              {statusLabel[chatStatus] || chatStatus}
-            </span>
-            <SessionStatusIndicator />
-            {/* Context occupancy ring gauge — visible after at least one completed turn */}
-            {runtime &&
-              runtime.last_call_prompt_tokens != null &&
-              runtime.last_call_prompt_tokens > 0 &&
-              runtime.context_window_limit != null &&
-              runtime.context_usage_ratio != null && (
-                <ContextRingGauge
-                  ratio={runtime.context_usage_ratio}
-                  promptTokens={runtime.last_call_prompt_tokens}
-                  windowLimit={runtime.context_window_limit}
+    <div className="flex h-full min-w-0 flex-1 overflow-hidden bg-transparent">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden px-4 py-3 md:px-6 md:py-4">
+        <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div className="flex flex-wrap items-center justify-between gap-3 px-2 py-2 md:px-4 md:py-2.5">
+            <div className="min-w-0">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <h2 className="truncate text-[16px] font-medium tracking-[-0.02em] text-text-primary">
+                  {sessionTitle}
+                </h2>
+                <span
+                  className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${statusColor[chatStatus] || statusColor.idle}`}
+                >
+                  {statusLabel[chatStatus] || chatStatus}
+                </span>
+                <SessionStatusIndicator />
+              </div>
+            </div>
+
+            <div className="shrink-0">
+              <div className="group relative z-40">
+                <button
+                  onClick={togglePanel}
+                  className={`inline-flex h-9 w-9 items-center justify-center rounded-full text-text-secondary transition hover:bg-bg-primary hover:text-text-primary ${panelOpen ? "bg-accent/10 text-accent" : ""}`}
+                  title={panelOpen ? "收起面板" : "展开面板"}
+                >
+                  <PanelRight size={15} />
+                </button>
+                <div className="ui-tooltip pointer-events-none absolute right-0 top-[calc(100%+0.5rem)] z-[80] hidden whitespace-nowrap group-hover:block">
+                  {panelOpen ? "收起面板" : "展开面板"}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+              <TaskPlanPanel />
+
+              <MessageList />
+
+              {pendingPermissions.length > 0 && (
+                <PermissionDialog
+                  permissions={pendingPermissions}
+                  sessionId={currentSessionId}
                 />
               )}
+
+            {/* Waiting recovery: session is "waiting" but SSE permission_ask was missed.
+                Only show after session enter completes (sessionReady) to avoid flashing
+                the banner while fetchPendingPermissions is still in-flight. */}
+            {sessionReady &&
+              chatStatus === "waiting" &&
+              pendingPermissions.length === 0 && (
+                <WaitingRecoveryBanner sessionId={currentSessionId} />
+              )}
+
+              {chatStatus === "subtask_waiting" && (
+                <div className="flex items-center gap-2 border-t border-purple-500/20 bg-purple-500/6 px-4 py-3">
+                  <div className="h-2 w-2 animate-pulse rounded-full bg-purple-500" />
+                  <span className="text-xs text-purple-500">
+                    正在等待子任务完成，相关输出会继续汇入右侧工作面板。
+                  </span>
+                  <button
+                    onClick={() => {
+                      const { openTaskOutput } = usePanelStore.getState();
+                      openTaskOutput();
+                    }}
+                    className="ml-auto rounded-full bg-purple-500/14 px-3 py-1 text-[11px] font-medium text-purple-500 transition hover:bg-purple-500/20"
+                  >
+                    查看任务输出
+                  </button>
+                </div>
+              )}
+
+            {/* Compact banner: show when SSE context_warning or ratio > 0.7,
+                but suppress after a successful compact until next real model call */}
+            {!justCompacted &&
+              (contextWarning ||
+                (runtime?.context_usage_ratio != null &&
+                  runtime.context_usage_ratio > 0.7)) &&
+              chatStatus === "idle" && (
+                <CompactBanner sessionId={currentSessionId} />
+              )}
+            </div>
+
+            <div className="relative z-[60] shrink-0">
+              <PromptInput
+                sessionId={currentSessionId}
+                contextUsageRatio={runtime?.context_usage_ratio}
+                promptTokens={runtime?.last_call_prompt_tokens}
+                windowLimit={runtime?.context_window_limit}
+              />
+            </div>
           </div>
-
-          {/* Policy mode indicator + switcher */}
-          <PolicySwitcher sessionId={currentSessionId} />
-        </div>
-
-        {/* Task plan panel */}
-        <TaskPlanPanel />
-
-        {/* Message list */}
-        <MessageList />
-
-        {/* Permission dialog */}
-        {pendingPermissions.length > 0 && (
-          <PermissionDialog
-            permissions={pendingPermissions}
-            sessionId={currentSessionId}
-          />
-        )}
-
-        {/* Waiting recovery: session is "waiting" but SSE permission_ask was missed.
-            Only show after session enter completes (sessionReady) to avoid flashing
-            the banner while fetchPendingPermissions is still in-flight. */}
-        {sessionReady &&
-          chatStatus === "waiting" &&
-          pendingPermissions.length === 0 && (
-            <WaitingRecoveryBanner sessionId={currentSessionId} />
-          )}
-
-        {/* Subtask waiting banner */}
-        {chatStatus === "subtask_waiting" && (
-          <div className="flex items-center gap-2 border-t border-purple-500/20 bg-purple-500/5 px-4 py-2">
-            <div className="h-2 w-2 animate-pulse rounded-full bg-purple-400" />
-            <span className="text-xs text-purple-400">
-              Agent is waiting for a child task to complete
-            </span>
-            <button
-              onClick={() => {
-                const { openTaskOutput } = usePanelStore.getState();
-                openTaskOutput();
-              }}
-              className="ml-auto rounded bg-purple-500/20 px-2 py-0.5 text-[10px] text-purple-400 transition hover:bg-purple-500/30"
-            >
-              View Task
-            </button>
-          </div>
-        )}
-
-        {/* Compact banner: show when SSE context_warning or ratio > 0.7,
-            but suppress after a successful compact until next real model call */}
-        {!justCompacted &&
-          (contextWarning ||
-            (runtime?.context_usage_ratio != null &&
-              runtime.context_usage_ratio > 0.7)) &&
-          chatStatus === "idle" && (
-            <CompactBanner sessionId={currentSessionId} />
-          )}
-
-        {/* Input */}
-        <PromptInput sessionId={currentSessionId} />
+        </section>
       </div>
 
-      {/* Work panel (half-screen overlay) */}
       <PanelShell sessionId={currentSessionId} />
     </div>
   );

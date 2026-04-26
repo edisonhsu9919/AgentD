@@ -8,6 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from session.models import Message, Session
 
 
+def normalize_agent_id(agent_id: str | None) -> str:
+    """Normalize legacy agent ids to the canonical runtime identity."""
+    normalized = (agent_id or "").strip()
+    if not normalized or normalized == "build":
+        return "assistant"
+    return normalized
+
+
 # ── Session CRUD ─────────────────────────────────────────────────────────────
 
 
@@ -16,14 +24,15 @@ async def create_session(
     user_id: uuid.UUID,
     model_id: str,
     title: str = "New Session",
-    agent_id: str = "build",
+    agent_id: str = "assistant",
     parent_id: Optional[uuid.UUID] = None,
 ) -> Session:
+    resolved_agent_id = normalize_agent_id(agent_id)
     session = Session(
         id=uuid.uuid4(),
         user_id=user_id,
         title=title,
-        agent_id=agent_id,
+        agent_id=resolved_agent_id,
         model_id=model_id,
         parent_id=parent_id,
         status="idle",

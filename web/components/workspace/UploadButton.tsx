@@ -44,7 +44,7 @@ export default function UploadButton({ sessionId }: UploadButtonProps) {
       <button
         onClick={() => inputRef.current?.click()}
         disabled={uploading}
-        className="flex items-center gap-1 rounded px-2 py-1 text-xs text-text-secondary transition hover:bg-bg-tertiary/50 disabled:opacity-50"
+        className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-text-secondary transition hover:bg-bg-tertiary/50 disabled:opacity-50"
         title="Upload files"
       >
         {uploading ? (

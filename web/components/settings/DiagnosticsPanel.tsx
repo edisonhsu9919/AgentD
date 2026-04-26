@@ -22,7 +22,7 @@ function DiagSection({
       <h4 className="mb-1 text-[10px] font-medium uppercase tracking-wider text-text-secondary">
         {title}
       </h4>
-      <div className="space-y-0.5 rounded border border-border bg-bg-primary p-2">
+      <div className="space-y-0.5 rounded-[16px] bg-white/70 p-2 shadow-[0_8px_20px_rgba(15,23,42,0.035)]">
         {children}
       </div>
     </div>
@@ -71,15 +71,15 @@ export default function DiagnosticsPanel({
   };
 
   return (
-    <div className="rounded-lg border border-border bg-bg-secondary p-4 space-y-3">
+    <div className="space-y-3 rounded-[24px] bg-bg-primary/42 p-3 shadow-[0_18px_44px_rgba(15,23,42,0.06)]">
       <button
         onClick={handleToggle}
-        className="flex w-full items-center gap-2 text-left"
+        className="flex w-full items-center gap-2 rounded-[18px] px-2 py-2 text-left transition hover:bg-white/70"
       >
         {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
         <Stethoscope size={13} className="text-text-secondary" />
         <span className="text-xs font-medium text-text-secondary">
-          Diagnostics
+          诊断信息
         </span>
       </button>
 
@@ -236,7 +236,7 @@ export default function DiagnosticsPanel({
           </div>
         ) : (
           <p className="text-xs text-text-secondary">
-            Unable to fetch diagnostics
+            暂时无法获取诊断信息
           </p>
         ))}
     </div>

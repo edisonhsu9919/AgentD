@@ -271,7 +271,7 @@ class LaunchSubagentTool(BaseTool):
                 user_id=uuid.UUID(ctx.user_id),
                 model_id=resolved.model_id,
                 title=f"[Sub] {title}",
-                agent_id="build",
+                agent_id="assistant",
                 parent_id=uuid.UUID(ctx.session_id),
             )
             await db.commit()
@@ -353,7 +353,7 @@ class LaunchSubagentTool(BaseTool):
                     "user_id": ctx.user_id,
                     "user_root": ctx.user_root,
                     "session_dir": child_session_dir,
-                    "agent_id": "build",
+                    "agent_id": "assistant",
                     "model_id": model_id,
                     "tool_profile": "child",
                     "allowed_tools": resolved_tools,

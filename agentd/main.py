@@ -232,10 +232,15 @@ app.include_router(workspace_router, prefix="/api/sessions", tags=["workspace"])
 from admin.router import router as admin_router
 app.include_router(admin_router, prefix="/api/admin/users", tags=["admin"])
 
-# Phase I2 — Admin model config management
-from model_config.router import router as model_config_router, runtime_router as model_runtime_router
+# Phase I2 — Model config management
+from model_config.router import (
+    public_runtime_router as model_public_runtime_router,
+    router as model_config_router,
+    runtime_router as model_runtime_router,
+)
 app.include_router(model_config_router, prefix="/api/admin/model-configs", tags=["admin-models"])
 app.include_router(model_runtime_router, prefix="/api/admin/runtime", tags=["admin-runtime"])
+app.include_router(model_public_runtime_router, prefix="/api/runtime", tags=["runtime"])
 
 # Phase P6-D: Knowledge Base API
 from knowledge.router import router as knowledge_router

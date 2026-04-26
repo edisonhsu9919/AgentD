@@ -1,5 +1,22 @@
+const LOOPBACK_API_PATTERN =
+  /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?\/api\/?$/i;
+
+const publicApiUrl = process.env.NEXT_PUBLIC_API_URL;
+const normalizedPublicApiUrl = publicApiUrl?.replace(/\/$/, "");
+
 export const API_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8011/api";
+  normalizedPublicApiUrl || "/api";
+
+// Next.js dev/proxy rewrites can buffer or swallow SSE on local loopback setups.
+// Keep normal authenticated REST calls on same-origin `/api`, but let the browser
+// connect to the backend directly for event streams when a loopback backend URL
+// is explicitly configured.
+export const SSE_API_URL =
+  typeof window !== "undefined" &&
+  publicApiUrl &&
+  LOOPBACK_API_PATTERN.test(publicApiUrl)
+    ? normalizedPublicApiUrl
+    : API_URL;
 
 export const DEFAULT_MODEL =
   process.env.NEXT_PUBLIC_DEFAULT_MODEL ||

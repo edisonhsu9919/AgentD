@@ -100,39 +100,45 @@ export default function TaskOutputPanel({ sessionId }: TaskOutputPanelProps) {
   }
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full gap-3 px-3 pb-3 pt-1">
       {/* Left: Task list */}
-      <div className="w-48 shrink-0 overflow-y-auto border-r border-border bg-bg-primary/30">
-        <div className="px-2 py-1.5">
+      <div className="w-48 shrink-0 overflow-y-auto rounded-[16px] bg-bg-primary/42 px-1.5 py-2">
+        <div className="px-2 pb-2">
           <span className="text-[10px] font-medium text-text-secondary">
             Tasks ({taskList.length})
           </span>
         </div>
-        {taskList.map((task) => (
-          <button
-            key={task.task_id}
-            onClick={() => selectTask(task.task_id)}
-            className={`flex w-full items-center gap-2 px-2 py-1.5 text-left transition ${
-              task.task_id === activeTaskId
-                ? "bg-bg-tertiary text-text-primary"
-                : "text-text-secondary hover:bg-bg-tertiary/50"
-            }`}
-          >
-            <TaskStatusIcon status={task.status} size={13} />
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-xs font-medium">
-                {task.title || "Untitled"}
+        <div className="space-y-0.5">
+          {taskList.map((task) => (
+            <button
+              key={task.task_id}
+              onClick={() => selectTask(task.task_id)}
+              className="group flex w-full items-center gap-2 px-1 py-0.5 text-left transition"
+            >
+              <div
+                className={`flex min-w-0 flex-1 items-center gap-2 rounded-[12px] px-2.5 py-1.5 transition ${
+                  task.task_id === activeTaskId
+                    ? "bg-white text-text-primary shadow-[0_8px_18px_rgba(42,41,51,0.05)]"
+                    : "text-text-secondary group-hover:bg-white/70 group-hover:text-text-primary"
+                }`}
+              >
+                <TaskStatusIcon status={task.status} size={13} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs font-medium">
+                    {task.title || "Untitled"}
+                  </div>
+                  <div className="flex items-center gap-1 text-[10px] text-text-secondary">
+                    <TaskKindBadge kind={task.task_kind} />
+                  </div>
+                </div>
               </div>
-              <div className="flex items-center gap-1 text-[10px] text-text-secondary">
-                <TaskKindBadge kind={task.task_kind} />
-              </div>
-            </div>
-          </button>
-        ))}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Right: Active task detail */}
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-[16px] bg-bg-primary/24">
         {activeTask ? (
           <TaskDetail task={activeTask} sessionId={sessionId} />
         ) : (
@@ -165,7 +171,7 @@ function TaskDetail({ task, sessionId }: { task: TaskInstance; sessionId: string
   return (
     <div className="flex h-full flex-col">
       {/* Status bar */}
-      <div className="space-y-1.5 border-b border-border px-3 py-2">
+      <div className="mx-3 mt-3 space-y-1.5 rounded-[14px] bg-white/70 px-3 py-2">
         <div className="flex items-center gap-2">
           <TaskStatusIcon status={task.status} size={14} />
           <span className="text-xs font-medium text-text-primary">
@@ -231,7 +237,7 @@ function TaskDetail({ task, sessionId }: { task: TaskInstance; sessionId: string
       </div>
 
       {/* Log area */}
-      <div className="flex-1 overflow-auto bg-bg-primary/30 p-3 font-mono text-xs">
+      <div className="flex-1 overflow-auto p-3 font-mono text-xs">
         {lines.length === 0 ? (
           <div className="flex h-full items-center justify-center text-text-secondary/50">
             <div className="text-center">
@@ -259,7 +265,7 @@ function TaskDetail({ task, sessionId }: { task: TaskInstance; sessionId: string
 
       {/* Result summary */}
       {task.result_summary && (
-        <div className="border-t border-border px-3 py-2">
+        <div className="mx-3 mb-3 rounded-[14px] bg-white/70 px-3 py-2">
           <div className="mb-1 text-[10px] font-medium text-text-secondary">Result</div>
           <p className="text-xs text-text-primary">{task.result_summary}</p>
         </div>

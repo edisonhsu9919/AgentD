@@ -21,7 +21,7 @@ class Session(Base):
         nullable=False,
     )
     title: Mapped[str] = mapped_column(Text, nullable=False, default="New Session")
-    agent_id: Mapped[str] = mapped_column(Text, nullable=False, default="build")
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False, default="assistant")
     model_id: Mapped[str] = mapped_column(Text, nullable=False)
     parent_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),

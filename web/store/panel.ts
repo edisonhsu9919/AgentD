@@ -13,9 +13,9 @@ import type {
 
 /** Fixed panel-type-level tabs. Tabs represent panel types, not file instances. */
 const FIXED_TABS: PanelTab[] = [
-  { id: "file_preview", type: "file_preview", title: "File Preview" },
-  { id: "task_output", type: "task_output", title: "Task Output" },
-  { id: "html_app", type: "html_app", title: "App" },
+  { id: "file_preview", type: "file_preview", title: "文件预览" },
+  { id: "task_output", type: "task_output", title: "任务输出" },
+  { id: "html_app", type: "html_app", title: "应用面板" },
 ];
 
 interface PanelState {
@@ -434,7 +434,7 @@ export const usePanelStore = create<PanelState>((set, get) => ({
             tags: Array.isArray(knowledgeImportDraft.tags)
               ? knowledgeImportDraft.tags.join(", ")
               : knowledgeImportDraft.tags,
-            permission: "private",
+            permission: knowledgeImportDraft.permission ?? "private",
           }),
         },
       );

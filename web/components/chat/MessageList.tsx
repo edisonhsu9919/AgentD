@@ -1,14 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useChatStore } from "@/store/chat";
-import { useSessionStore } from "@/store/session";
+import { useTaskPlanStore } from "@/store/taskPlan";
 import MessageBubble from "./MessageBubble";
 import SummaryDivider from "./SummaryDivider";
 import ToolCallBlock from "./ToolCallBlock";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { Bot, Loader2, Clock, ChevronRight } from "lucide-react";
+import MessageMarkdown from "./MessageMarkdown";
+import { ArrowDown, Loader2, Clock, ChevronRight, Wrench } from "lucide-react";
+import type { Message } from "@/lib/types";
 
 /**
  * Parse streaming content into thinking vs formal text.
@@ -99,7 +99,7 @@ function ThinkingBlock({
         <div className="flex items-center gap-2 text-xs">
           <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
           <span className="animate-pulse font-medium text-text-secondary">
-            Thinking...
+            正在思考...
           </span>
         </div>
         {content && (
@@ -123,7 +123,7 @@ function ThinkingBlock({
           size={10}
           className={`transition-transform ${showContent ? "rotate-90" : ""}`}
         />
-        <span>Thought for a moment</span>
+        <span>查看思考过程</span>
       </button>
       {showContent && (
         <div className="ml-1 mt-1 max-h-40 overflow-y-auto border-l border-border pl-3 text-xs leading-relaxed text-text-secondary/40 italic">
@@ -134,19 +134,81 @@ function ThinkingBlock({
   );
 }
 
+function TranscriptRow({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex w-full justify-start py-2">
+      <div className="min-w-0 max-w-[min(100%,56rem)] space-y-2.5 chat-copy">
+        {children}
+      </div>
+    </div>
+  );
+}
+
 export default function MessageList() {
-  const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const messages = useChatStore((s) => s.messages);
   const streamingDraft = useChatStore((s) => s.streamingDraft);
   const streamingThinking = useChatStore((s) => s.streamingThinking);
   const streamingToolCalls = useChatStore((s) => s.streamingToolCalls);
   const status = useChatStore((s) => s.status);
+  const plan = useTaskPlanStore((s) => s.plan);
 
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const initializedSessionRef = useRef<string | null>(null);
+  const isNearBottomRef = useRef(true);
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
+  const hasTaskPlan = !!plan.task.title || plan.steps.length > 0;
+
+  const activeSessionId = messages[0]?.session_id ?? null;
+
+  const scrollViewportToBottom = (behavior: ScrollBehavior = "auto") => {
+    const scrollArea = scrollAreaRef.current;
+    if (!scrollArea) return;
+    scrollArea.scrollTo({
+      top: scrollArea.scrollHeight,
+      behavior,
+    });
+  };
+
+  const jumpToBottom = (behavior: ScrollBehavior = "auto") => {
+    scrollViewportToBottom(behavior);
+    isNearBottomRef.current = true;
+    setShowJumpToBottom(false);
+  };
+
+  const updateNearBottomState = () => {
+    const scrollArea = scrollAreaRef.current;
+    if (!scrollArea) return;
+    const distanceFromBottom =
+      scrollArea.scrollHeight - scrollArea.scrollTop - scrollArea.clientHeight;
+    const nearBottom = distanceFromBottom < 96;
+    isNearBottomRef.current = nearBottom;
+    setShowJumpToBottom(!nearBottom);
+  };
+
+  useLayoutEffect(() => {
+    if (!activeSessionId) return;
+    if (initializedSessionRef.current !== activeSessionId) {
+      initializedSessionRef.current = activeSessionId;
+      scrollViewportToBottom("auto");
+      isNearBottomRef.current = true;
+      const timer = window.setTimeout(() => setShowJumpToBottom(false), 0);
+      return () => window.clearTimeout(timer);
+    }
+  }, [activeSessionId, messages.length]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamingDraft, streamingThinking, streamingToolCalls]);
+    if (isNearBottomRef.current) {
+      scrollViewportToBottom("smooth");
+      return;
+    }
+    const timer = window.setTimeout(() => setShowJumpToBottom(true), 0);
+    return () => window.clearTimeout(timer);
+  }, [streamingDraft, streamingThinking, streamingToolCalls.length, status]);
 
   // Build cross-message tool_call_id → {tool_name, input} map so tool_result parts
   // in ToolMessages (role: "tool") can resolve their tool identity from the matching
@@ -237,51 +299,141 @@ export default function MessageList() {
     streamingToolCalls.length > 0 ||
     status === "running";
 
+  const renderedRows = useMemo(() => {
+    const rows: Array<
+      | { type: "summary"; key: string; message: Message }
+      | { type: "message"; key: string; message: Message }
+      | { type: "tool-group"; key: string; messages: Message[]; toolCount: number }
+    > = [];
+
+    let index = 0;
+    while (index < messages.length) {
+      const message = messages[index];
+
+      if (message.is_summary) {
+        rows.push({ type: "summary", key: message.id, message });
+        index += 1;
+        continue;
+      }
+
+      if (!isToolHistoryOnlyMessage(message)) {
+        rows.push({ type: "message", key: message.id, message });
+        index += 1;
+        continue;
+      }
+
+      const group: Message[] = [];
+      let cursor = index;
+      while (cursor < messages.length && isToolHistoryOnlyMessage(messages[cursor])) {
+        group.push(messages[cursor]);
+        cursor += 1;
+      }
+
+      const hasConclusionAfterGroup =
+        cursor < messages.length &&
+        !messages[cursor].is_summary &&
+        !isToolHistoryOnlyMessage(messages[cursor]);
+
+      if (hasConclusionAfterGroup) {
+        rows.push({
+          type: "tool-group",
+          key: `${group[0].id}-group`,
+          messages: group,
+          toolCount: group.reduce(
+            (count, item) =>
+              count +
+              item.parts.filter(
+                (part) => part.type === "tool_call" || part.type === "tool_result",
+              ).length,
+            0,
+          ),
+        });
+      } else {
+        for (const item of group) {
+          rows.push({ type: "message", key: item.id, message: item });
+        }
+      }
+
+      index = cursor;
+    }
+
+    return rows;
+  }, [messages]);
+
   return (
-    <div className="min-w-0 flex-1 overflow-y-auto px-4 py-4">
-      {/* Persisted messages — is_summary renders as SummaryDivider inline */}
-      {messages.map((msg) =>
-        msg.is_summary ? (
-          <SummaryDivider key={msg.id} message={msg} />
-        ) : (
+    <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-8 bg-gradient-to-b from-background via-background/80 to-transparent" />
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-10 bg-gradient-to-t from-background via-background/80 to-transparent" />
+      <div
+        ref={scrollAreaRef}
+        onScroll={updateNearBottomState}
+        className="h-full overflow-y-auto px-2 py-1 md:px-4"
+      >
+        <div
+          className={`mx-auto flex w-full max-w-[1080px] flex-col gap-3 pb-4 pt-2 ${hasTaskPlan ? "pt-24 md:pt-28" : ""}`}
+        >
+      {/* Persisted messages — tool-only runs collapse only after a later conclusion appears */}
+      {renderedRows.map((row) => {
+        if (row.type === "summary") {
+          return <SummaryDivider key={row.key} message={row.message} />;
+        }
+
+        if (row.type === "tool-group") {
+          return (
+            <CollapsedToolHistoryGroup key={row.key} toolCount={row.toolCount}>
+              {row.messages.map((message) => (
+                <MessageBubble
+                  key={message.id}
+                  message={message}
+                  toolInfoMap={toolInfoMap}
+                  knowledgeSources={knowledgeSourcesMap.get(message.id)}
+                />
+              ))}
+            </CollapsedToolHistoryGroup>
+          );
+        }
+
+        return (
           <MessageBubble
-            key={msg.id}
-            message={msg}
+            key={row.key}
+            message={row.message}
             toolInfoMap={toolInfoMap}
-            knowledgeSources={knowledgeSourcesMap.get(msg.id)}
-            sessionId={currentSessionId || ""}
+            knowledgeSources={knowledgeSourcesMap.get(row.message.id)}
           />
-        ),
-      )}
+        );
+      })}
 
       {/* Queued indicator */}
       {status === "queued" && !hasStreaming && (
-        <div className="mb-4 flex justify-start">
-          <div className="flex items-center gap-2 rounded-lg border border-yellow-500/30 bg-yellow-500/5 px-4 py-3">
+        <TranscriptRow>
+          <div className="flex items-center gap-2 text-[12px] text-yellow-500">
             <Clock size={14} className="animate-pulse text-yellow-400" />
-            <span className="text-sm text-yellow-400">
-              Queued — waiting for worker...
+            <span>
+              已进入队列，正在等待 worker 接手...
             </span>
           </div>
-        </div>
+        </TranscriptRow>
       )}
 
       {/* Streaming content (not yet persisted) */}
       {hasStreaming && (
-        <div className="mb-4 flex justify-start">
-          <div className="min-w-0 max-w-[85%] rounded-lg border border-border bg-bg-secondary px-4 py-3">
-            <div className="mb-1 flex items-center gap-1.5">
-              <Bot size={12} className="text-text-secondary" />
-              <span className="text-xs font-medium text-text-secondary">
-                Agent
-              </span>
-              {(status === "running" || status === "queued") && (
-                <Loader2
-                  size={12}
-                  className="animate-spin text-accent"
-                />
-              )}
-            </div>
+        <TranscriptRow>
+          <div className="min-w-0 space-y-2.5">
+            {(status === "running" || status === "queued") && (
+              <div className="flex items-center gap-2 text-[11px] text-text-secondary">
+                {status === "running" ? (
+                  <RunningBars />
+                ) : (
+                  <>
+                    <Loader2
+                      size={12}
+                      className="animate-spin text-accent"
+                    />
+                    <span>排队中</span>
+                  </>
+                )}
+              </div>
+            )}
 
             {/* Thinking block — from reasoning_delta, <think> tags, or gap detection */}
             {showThinking && (
@@ -300,15 +452,14 @@ export default function MessageList() {
                 output={tc.output}
                 isError={tc.is_error}
                 status={tc.status}
+                autoCollapseOnComplete={false}
               />
             ))}
 
             {/* Formal text (after thinking) */}
             {formalText && (
-              <div className="prose prose-invert prose-sm max-w-none">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {formalText}
-                </ReactMarkdown>
+              <div className="chat-prose">
+                <MessageMarkdown>{formalText}</MessageMarkdown>
               </div>
             )}
 
@@ -319,10 +470,80 @@ export default function MessageList() {
               </span>
             )}
           </div>
-        </div>
+        </TranscriptRow>
       )}
 
       <div ref={bottomRef} />
+        </div>
+      </div>
+      {showJumpToBottom && (
+        <button
+          type="button"
+          onClick={() => jumpToBottom("smooth")}
+          className="absolute bottom-4 left-1/2 z-30 inline-flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full bg-white/92 text-text-secondary shadow-[0_14px_36px_rgba(42,41,51,0.14)] backdrop-blur transition hover:bg-white hover:text-text-primary"
+          title="回到最新消息"
+        >
+          <ArrowDown size={15} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function RunningBars() {
+  return (
+    <div className="flow-running-bars flex items-end gap-1">
+      {Array.from({ length: 5 }).map((_, index) => (
+        <span
+          key={index}
+          className="h-3 w-2 rounded-full bg-accent/20"
+          style={{ animationDelay: `${index * 0.14}s` }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function isToolHistoryOnlyMessage(message: Message) {
+  return (
+    !message.is_summary &&
+    message.role !== "user" &&
+    message.parts.some(
+      (part) => part.type === "tool_call" || part.type === "tool_result",
+    ) &&
+    message.parts.every(
+      (part) =>
+        part.type === "tool_call" ||
+        part.type === "tool_result" ||
+        part.type === "reasoning",
+    )
+  );
+}
+
+function CollapsedToolHistoryGroup({
+  children,
+  toolCount,
+}: {
+  children: React.ReactNode;
+  toolCount: number;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="space-y-2 py-1">
+      <button
+        onClick={() => setOpen((prev) => !prev)}
+        className="flex items-center gap-2 text-[12px] text-text-secondary transition hover:text-text-primary"
+      >
+        <ChevronRight
+          size={12}
+          className={`transition-transform ${open ? "rotate-90" : ""}`}
+        />
+        <Wrench size={12} />
+        <span>工具记录</span>
+        <span className="text-[11px] text-text-secondary/70">{toolCount}</span>
+      </button>
+      {open && <div className="space-y-1.5">{children}</div>}
     </div>
   );
 }

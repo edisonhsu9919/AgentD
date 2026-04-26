@@ -12,9 +12,9 @@ interface RuntimeStatusProps {
 export default function RuntimeStatus({ health, loading, vlmConfig }: RuntimeStatusProps) {
   if (loading && !health) {
     return (
-      <div className="rounded-lg border border-border bg-bg-secondary p-4">
-        <h3 className="mb-3 text-xs font-medium text-text-secondary">
-          Runtime Status
+      <div className="space-y-4 rounded-[28px] bg-bg-primary/42 p-5 shadow-[0_18px_44px_rgba(15,23,42,0.06)]">
+        <h3 className="text-sm font-medium text-text-secondary">
+          运行时状态
         </h3>
         <div className="flex items-center justify-center py-6">
           <div className="h-4 w-4 animate-spin rounded-full border-2 border-accent border-t-transparent" />
@@ -25,31 +25,31 @@ export default function RuntimeStatus({ health, loading, vlmConfig }: RuntimeSta
 
   if (!health) {
     return (
-      <div className="rounded-lg border border-border bg-bg-secondary p-4">
-        <h3 className="mb-3 text-xs font-medium text-text-secondary">
-          Runtime Status
+      <div className="space-y-4 rounded-[28px] bg-bg-primary/42 p-5 shadow-[0_18px_44px_rgba(15,23,42,0.06)]">
+        <h3 className="text-sm font-medium text-text-secondary">
+          运行时状态
         </h3>
         <p className="text-xs text-text-secondary">
-          Unable to fetch health status
+          无法获取健康状态
         </p>
       </div>
     );
   }
 
   return (
-    <div className="rounded-lg border border-border bg-bg-secondary p-4 space-y-3">
-      <h3 className="text-xs font-medium text-text-secondary">
-        Runtime Status
+    <div className="space-y-4 rounded-[28px] bg-bg-primary/42 p-5 shadow-[0_18px_44px_rgba(15,23,42,0.06)]">
+      <h3 className="text-sm font-medium text-text-secondary">
+        运行时状态
       </h3>
 
       {/* Key status cards */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {/* Ready */}
         <div
-          className={`rounded-lg border p-3 ${
+          className={`rounded-[20px] p-3 shadow-[0_8px_24px_rgba(15,23,42,0.04)] ${
             health.ready
-              ? "border-success/30 bg-success/5"
-              : "border-danger/30 bg-danger/5"
+              ? "bg-success/5"
+              : "bg-danger/5"
           }`}
         >
           <div className="mb-1 flex items-center gap-1.5">
@@ -59,7 +59,7 @@ export default function RuntimeStatus({ health, loading, vlmConfig }: RuntimeSta
               <XCircle size={13} className="text-danger" />
             )}
             <span className="text-[10px] font-medium text-text-secondary">
-              Ready
+              就绪
             </span>
           </div>
           <span
@@ -67,7 +67,7 @@ export default function RuntimeStatus({ health, loading, vlmConfig }: RuntimeSta
               health.ready ? "text-success" : "text-danger"
             }`}
           >
-            {health.ready ? "Yes" : "No"}
+            {health.ready ? "是" : "否"}
           </span>
           {!health.ready && health.degraded_reason && (
             <p className="mt-0.5 text-[10px] text-danger">
@@ -78,10 +78,10 @@ export default function RuntimeStatus({ health, loading, vlmConfig }: RuntimeSta
 
         {/* Schema */}
         <div
-          className={`rounded-lg border p-3 ${
+          className={`rounded-[20px] p-3 shadow-[0_8px_24px_rgba(15,23,42,0.04)] ${
             health.schema_ok
-              ? "border-success/30 bg-success/5"
-              : "border-danger/30 bg-danger/5"
+              ? "bg-success/5"
+              : "bg-danger/5"
           }`}
         >
           <div className="mb-1 flex items-center gap-1.5">
@@ -103,17 +103,17 @@ export default function RuntimeStatus({ health, loading, vlmConfig }: RuntimeSta
           </span>
           {!health.schema_ok && (
             <p className="mt-0.5 text-[10px] text-danger">
-              Expected: {health.schema_expected}
+              期望版本：{health.schema_expected}
             </p>
           )}
         </div>
 
         {/* LLM Model */}
         <div
-          className={`rounded-lg border p-3 ${
+          className={`rounded-[20px] p-3 shadow-[0_8px_24px_rgba(15,23,42,0.04)] ${
             health.runtime_model_source === "db_default"
-              ? "border-success/30 bg-success/5"
-              : "border-warning/30 bg-warning/5"
+              ? "bg-success/5"
+              : "bg-warning/5"
           }`}
         >
           <div className="mb-1 flex items-center gap-1.5">
@@ -126,7 +126,7 @@ export default function RuntimeStatus({ health, loading, vlmConfig }: RuntimeSta
               }
             />
             <span className="text-[10px] font-medium text-text-secondary">
-              LLM Model
+              LLM 模型
             </span>
           </div>
           <span className="block truncate text-sm font-semibold text-text-primary">
@@ -134,19 +134,19 @@ export default function RuntimeStatus({ health, loading, vlmConfig }: RuntimeSta
           </span>
           <p className="mt-0.5 text-[10px] text-text-secondary">
             {health.runtime_model_source === "env_fallback"
-              ? "env fallback"
-              : "db default"}
+              ? "环境变量回退"
+              : "数据库默认"}
           </p>
         </div>
 
         {/* VLM Model */}
         <div
-          className={`rounded-lg border p-3 ${
+          className={`rounded-[20px] p-3 shadow-[0_8px_24px_rgba(15,23,42,0.04)] ${
             vlmConfig?.available
               ? vlmConfig.source === "db_default"
-                ? "border-purple-500/30 bg-purple-500/5"
-                : "border-purple-500/20 bg-purple-500/5"
-              : "border-border bg-bg-primary/50"
+                ? "bg-purple-500/5"
+                : "bg-purple-500/5"
+              : "bg-white/50"
           }`}
         >
           <div className="mb-1 flex items-center gap-1.5">
@@ -157,7 +157,7 @@ export default function RuntimeStatus({ health, loading, vlmConfig }: RuntimeSta
               }
             />
             <span className="text-[10px] font-medium text-text-secondary">
-              VLM Model
+              VLM 模型
             </span>
           </div>
           {vlmConfig?.available && vlmConfig.active_config ? (
@@ -166,37 +166,36 @@ export default function RuntimeStatus({ health, loading, vlmConfig }: RuntimeSta
                 {vlmConfig.active_config.name}
               </span>
               <p className="mt-0.5 text-[10px] text-text-secondary">
-                {vlmConfig.source === "env_fallback" ? "env fallback" : "db default"}
+                {vlmConfig.source === "env_fallback" ? "环境变量回退" : "数据库默认"}
               </p>
             </>
           ) : (
             <>
               <span className="text-sm font-semibold text-text-secondary/40">
-                Not configured
+                未配置
               </span>
               <p className="mt-0.5 text-[10px] text-text-secondary/40">
-                No vision model
+                暂无视觉模型
               </p>
             </>
           )}
         </div>
       </div>
 
-      {/* Detail row */}
       <div className="flex flex-wrap gap-x-6 gap-y-1 text-[10px] text-text-secondary">
         <span>
-          Version:{" "}
+          版本：{" "}
           <strong className="text-text-primary">{health.version}</strong>
         </span>
         <span>
-          Instance:{" "}
+          实例：{" "}
           <strong className="text-text-primary">{health.instance_id}</strong>
         </span>
         <span>
           PID: <strong className="text-text-primary">{health.pid}</strong>
         </span>
         <span>
-          Started:{" "}
+          启动时间：{" "}
           <strong className="text-text-primary">
             {new Date(health.started_at).toLocaleString()}
           </strong>
@@ -204,13 +203,13 @@ export default function RuntimeStatus({ health, loading, vlmConfig }: RuntimeSta
         {health.runtime_model && (
           <>
             <span>
-              Model ID:{" "}
+              Model ID：{" "}
               <strong className="text-text-primary">
                 {health.runtime_model.model_id}
               </strong>
             </span>
             <span>
-              Provider:{" "}
+              Provider：{" "}
               <strong className="text-text-primary">
                 {health.runtime_model.provider_type}
               </strong>

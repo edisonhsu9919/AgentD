@@ -11,6 +11,7 @@ Tests cover:
 
 import json
 import os
+import uuid
 from dataclasses import asdict
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -38,8 +39,8 @@ def session_dir(user_root):
 
 def _make_ctx(session_dir: str) -> ToolContext:
     return ToolContext(
-        user_id="test-user",
-        session_id="test-session",
+        user_id="00000000-0000-0000-0000-000000000001",
+        session_id="00000000-0000-0000-0000-000000000002",
         user_root=os.path.dirname(os.path.dirname(session_dir)),
         session_dir=session_dir,
         workspace_dir=session_dir,
@@ -254,8 +255,40 @@ class TestLaunchSubagentMetadata:
         assert meta["resolved_tools"] == ["bash", "file_write"]
 
         payload = enqueue_start.await_args.kwargs["payload"]
+        assert payload["agent_id"] == "assistant"
         assert payload["tool_profile"] == "child"
         assert payload["allowed_tools"] == ["bash", "file_write"]
+
+    @pytest.mark.asyncio
+    async def test_create_child_session_defaults_to_assistant(self, session_dir):
+        from tools.launch_subagent import LaunchSubagentTool
+
+        tool = LaunchSubagentTool()
+        ctx = _make_ctx(session_dir)
+
+        db = AsyncMock()
+        db_ctx = AsyncMock()
+        db_ctx.__aenter__.return_value = db
+        db_ctx.__aexit__.return_value = False
+
+        mock_child = MagicMock(id=uuid.uuid4())
+        mock_resolved = MagicMock(model_id="test-model")
+
+        with (
+            patch("core.database.AsyncSessionLocal", return_value=db_ctx),
+            patch("model_config.service.resolve_active_model_config", new=AsyncMock(return_value=mock_resolved)),
+            patch("session.service.create_session", new=AsyncMock(return_value=mock_child)) as mock_create_session,
+        ):
+            child_session_id, child_model_id = await tool._create_child_session(
+                ctx,
+                task_id="task-001",
+                title="Child Work",
+                task_packet="do the thing",
+            )
+
+        assert child_session_id == str(mock_child.id)
+        assert child_model_id == "test-model"
+        assert mock_create_session.await_args.kwargs["agent_id"] == "assistant"
 
 
 # ── Registry tool count and profiles ─────────────────────────────────────

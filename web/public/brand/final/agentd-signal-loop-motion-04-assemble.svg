@@ -1,0 +1,75 @@
+<svg
+  width="420"
+  height="100"
+  viewBox="0 0 420 100"
+  fill="none"
+  xmlns="http://www.w3.org/2000/svg"
+  role="img"
+  aria-labelledby="title desc"
+>
+  <title id="title">AgentD Signal Loop Motion 04</title>
+  <desc id="desc">A looping assemble motion for the icon and wordmark.</desc>
+  <g>
+    <animateTransform
+      attributeName="transform"
+      type="translate"
+      values="-8 0;0 0;0 0;0 0;-8 0"
+      dur="3.2s"
+      repeatCount="indefinite"
+    />
+    <animate
+      attributeName="opacity"
+      values="0;1;1;1;0"
+      dur="3.2s"
+      repeatCount="indefinite"
+    />
+    <path
+      d="M30 26H54C66.1503 26 76 35.8497 76 48C76 60.1503 66.1503 70 54 70H46V58H54C59.5228 58 64 53.5228 64 48C64 42.4772 59.5228 38 54 38H30V26Z"
+      fill="#1C1F27"
+    />
+  </g>
+  <g>
+    <animateTransform
+      attributeName="transform"
+      type="translate"
+      values="8 0;0 0;0 0;0 0;8 0"
+      dur="3.2s"
+      repeatCount="indefinite"
+    />
+    <animate
+      attributeName="opacity"
+      values="0;1;1;1;0"
+      dur="3.2s"
+      repeatCount="indefinite"
+    />
+    <path
+      d="M70 74H46C33.8497 74 24 64.1503 24 52C24 39.8497 33.8497 30 46 30H54V42H46C40.4772 42 36 46.4772 36 52C36 57.5228 40.4772 62 46 62H70V74Z"
+      fill="#705CFF"
+    />
+  </g>
+  <g>
+    <animate
+      attributeName="opacity"
+      values="0;0;1;1;0"
+      dur="3.2s"
+      repeatCount="indefinite"
+    />
+    <animateTransform
+      attributeName="transform"
+      type="translate"
+      values="8 0;8 0;0 0;0 0;8 0"
+      dur="3.2s"
+      repeatCount="indefinite"
+    />
+    <text
+      x="118"
+      y="64"
+      font-family="Inter, Geist, Arial, sans-serif"
+      font-size="44"
+      font-weight="600"
+      letter-spacing="-0.04em"
+    >
+      <tspan fill="#1C1F27">agent</tspan><tspan fill="#705CFF">d</tspan>
+    </text>
+  </g>
+</svg>

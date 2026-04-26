@@ -35,7 +35,7 @@ function FileTreeNode({
       <div>
         <button
           onClick={() => setExpanded(!expanded)}
-          className="flex w-full items-center gap-1.5 rounded px-2 py-1 text-sm text-text-secondary hover:bg-bg-tertiary/50"
+          className="flex w-full items-center gap-1.5 rounded-[16px] px-2 py-2 text-sm text-text-secondary transition hover:bg-bg-primary hover:text-text-primary"
           style={{ paddingLeft: `${depth * 12 + 8}px` }}
         >
           {expanded ? (
@@ -72,8 +72,8 @@ function FileTreeNode({
     <div
       className={`group flex w-full items-center rounded text-sm transition ${
         isSelected
-          ? "bg-accent/10 text-accent"
-          : "text-text-secondary hover:bg-bg-tertiary/50"
+          ? "bg-accent/8 text-accent"
+          : "text-text-secondary hover:bg-bg-primary hover:text-text-primary"
       }`}
       style={{ paddingLeft: `${depth * 12 + 20}px` }}
     >
@@ -90,8 +90,8 @@ function FileTreeNode({
             e.stopPropagation();
             onDelete(node.path);
           }}
-          className="mr-1 shrink-0 rounded p-0.5 opacity-0 transition hover:bg-danger/10 hover:text-danger group-hover:opacity-100"
-          title="Delete file"
+          className="mr-1 shrink-0 rounded-full p-1 opacity-0 transition hover:bg-danger/10 hover:text-danger group-hover:opacity-100"
+          title="删除文件"
         >
           <Trash2 size={12} />
         </button>
@@ -115,8 +115,8 @@ export default function FileTree({
 }: FileTreeProps) {
   if (tree.length === 0) {
     return (
-      <div className="px-3 py-4 text-center text-xs text-text-secondary">
-        No files yet
+      <div className="px-2 py-5 text-center text-sm text-text-secondary/70">
+        当前会话还没有文件。
       </div>
     );
   }

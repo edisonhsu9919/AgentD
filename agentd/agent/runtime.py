@@ -26,6 +26,9 @@ from tools.registry import get_registry
 # ── Layered Prompt Builder (§8.3) ─────────────────────────────────────────
 
 PROMPT_DIR = Path(__file__).parent / "prompts"
+_AGENT_ALIASES = {
+    "build": "assistant",
+}
 
 
 def _load_runtime_header(
@@ -54,20 +57,30 @@ def _load_runtime_header(
     return "\n".join(lines) + "\n"
 
 
+def _resolve_agent_id(agent_id: str | None) -> str:
+    """Resolve runtime agent aliases to their canonical prompt identity."""
+    normalized = (agent_id or "").strip()
+    if not normalized:
+        return "assistant"
+    return _AGENT_ALIASES.get(normalized, normalized)
+
+
 def _load_role_prompt(agent_id: str) -> str:
     """Layer 2: Role Prompt — agent persona and capabilities.
 
     Looks in prompts/roles/ first, falls back to prompts/ for compatibility.
     """
-    roles_path = PROMPT_DIR / "roles" / f"{agent_id}.md"
+    resolved_agent_id = _resolve_agent_id(agent_id)
+
+    roles_path = PROMPT_DIR / "roles" / f"{resolved_agent_id}.md"
     if roles_path.exists():
         return roles_path.read_text(encoding="utf-8")
     # Fallback to legacy flat layout
-    legacy_path = PROMPT_DIR / f"{agent_id}.md"
+    legacy_path = PROMPT_DIR / f"{resolved_agent_id}.md"
     if legacy_path.exists():
         return legacy_path.read_text(encoding="utf-8")
-    # Ultimate fallback to build role
-    fallback = PROMPT_DIR / "roles" / "build.md"
+    # Ultimate fallback to assistant role
+    fallback = PROMPT_DIR / "roles" / "assistant.md"
     if fallback.exists():
         return fallback.read_text(encoding="utf-8")
     return ""
@@ -170,8 +183,11 @@ def _load_skills_metadata_layer(loaded_skills: list[dict] | None) -> str:
     lines.append("")
     lines.append(
         "These skills are available to this session. "
-        "When a task matches a skill's description, use `skill load <name>` directly — "
-        "do NOT call `skill list` to rediscover the same catalog. "
+        "When a task matches a skill's description, call the `skill` tool with "
+        '`action="load"` and the bare skill name in the `name` field. '
+        "Do not wrap the skill name with extra quotes. "
+        'Example: {"action":"load","name":"pdf-rename"}. '
+        "Do NOT call `skill list` to rediscover the same catalog. "
         "Use `skill list` only for explicit discovery or troubleshooting."
     )
     return "\n".join(lines)
@@ -307,9 +323,10 @@ def build_system_prompt(
     layers: list[str] = []
     layer_sizes: dict[str, int] = {}
     effective_workspace = workspace_dir or session_dir
+    resolved_agent_id = _resolve_agent_id(agent_id)
 
     # Layer 1: Role Prompt (identity — "who you are")
-    role = _load_role_prompt(agent_id)
+    role = _load_role_prompt(resolved_agent_id)
     if role:
         layers.append(role)
     layer_sizes["role"] = len(role) if role else 0
@@ -322,7 +339,7 @@ def build_system_prompt(
 
     # Layer 3: Runtime Header (dynamic environment)
     header = _load_runtime_header(
-        agent_id,
+        resolved_agent_id,
         session_dir,
         effective_workspace,
         user_root,
@@ -355,7 +372,7 @@ def build_system_prompt(
     prompt = "\n\n---\n\n".join(layers)
 
     if settings.debug:
-        _debug_prompt_layers(agent_id, layers)
+        _debug_prompt_layers(resolved_agent_id, layers)
 
     # Prompt assembly trace — ordered list reflecting Phase 5 sequence
     prompt_assembly_order = [

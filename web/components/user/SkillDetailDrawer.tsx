@@ -15,6 +15,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import SkillIcon from "@/components/shared/SkillIcon";
+import MessageMarkdown from "@/components/chat/MessageMarkdown";
 import type { SquareDetailResponse, SquareTreeNode } from "@/lib/types";
 
 interface SkillDetailDrawerProps {
@@ -76,14 +77,14 @@ export default function SkillDetailDrawer({
 
   if (loading) {
     return (
-      <div className="flex h-full flex-col border-l border-border bg-bg-secondary">
-        <div className="flex items-center justify-between border-b border-border px-3 py-2">
+      <div className="flex h-full flex-col rounded-[18px] bg-white/96 shadow-[0_24px_70px_rgba(42,41,51,0.12)] backdrop-blur">
+        <div className="flex items-center justify-between px-4 py-3">
           <span className="text-xs font-medium text-text-secondary">
             Loading...
           </span>
           <button
             onClick={onClose}
-            className="rounded p-1 text-text-secondary transition hover:bg-bg-tertiary/50"
+            className="rounded-full p-1.5 text-text-secondary transition hover:bg-white/70"
           >
             <X size={14} />
           </button>
@@ -97,14 +98,14 @@ export default function SkillDetailDrawer({
 
   if (!detail) {
     return (
-      <div className="flex h-full flex-col border-l border-border bg-bg-secondary">
-        <div className="flex items-center justify-between border-b border-border px-3 py-2">
+      <div className="flex h-full flex-col rounded-[18px] bg-white/96 shadow-[0_24px_70px_rgba(42,41,51,0.12)] backdrop-blur">
+        <div className="flex items-center justify-between px-4 py-3">
           <span className="text-xs font-medium text-text-secondary">
             Skill Detail
           </span>
           <button
             onClick={onClose}
-            className="rounded p-1 text-text-secondary transition hover:bg-bg-tertiary/50"
+            className="rounded-full p-1.5 text-text-secondary transition hover:bg-white/70"
           >
             <X size={14} />
           </button>
@@ -117,42 +118,90 @@ export default function SkillDetailDrawer({
   }
 
   // Install/uninstall button logic (J3 brief §5.1)
-  const viewingInstalledVersion =
-    detail.installed && detail.installed_version === detail.selected_version;
   const viewingOtherVersion =
     detail.installed && detail.installed_version !== detail.selected_version;
+  const actionControls = isSquareMode ? (
+    <div className="ml-auto flex shrink-0 items-center gap-2">
+      {!detail.installed ? (
+        <button
+          onClick={() => onInstall?.(detail.selected_skill_id)}
+          disabled={actionLoading || detail.enabled === false}
+          className="inline-flex h-8 w-[72px] items-center justify-center gap-1 rounded-full bg-accent text-[11px] font-medium text-white shadow-[0_12px_24px_rgba(139,92,246,0.16)] transition hover:bg-accent/90 disabled:opacity-50"
+        >
+          {actionLoading ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <Download size={12} />
+          )}
+          安装
+        </button>
+      ) : (
+        <button
+          onClick={() => onUninstall?.(detail.selected_skill_id)}
+          disabled={actionLoading}
+          className="inline-flex h-8 w-[72px] items-center justify-center gap-1 rounded-full bg-warning/70 text-[11px] font-medium text-warning-foreground transition hover:bg-warning disabled:opacity-50"
+        >
+          {actionLoading ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <Trash2 size={12} />
+          )}
+          卸载
+        </button>
+      )}
+
+      {onDeleteGlobal && (
+        <button
+          onClick={() => {
+            const ok = window.confirm(
+              `Delete "${detail.name}" from system?\n\nThis will:\n- Remove the skill from the system catalog\n- Uninstall it from ALL users\n- This action cannot be undone`,
+            );
+            if (ok) onDeleteGlobal(detail.selected_skill_id);
+          }}
+          disabled={actionLoading}
+          className="inline-flex h-8 w-[72px] items-center justify-center gap-1 rounded-full bg-danger/10 text-[11px] font-medium text-danger transition hover:bg-danger/20 disabled:opacity-50"
+        >
+          <Trash2 size={12} />
+          删除
+        </button>
+      )}
+    </div>
+  ) : null;
 
   return (
-    <div className="flex h-full flex-col border-l border-border bg-bg-secondary">
+    <div className="flex h-full flex-col rounded-[18px] bg-white/96 shadow-[0_24px_70px_rgba(42,41,51,0.12)] backdrop-blur">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-border px-3 py-2">
-        <div className="flex items-center gap-2 min-w-0">
-          <SkillIcon icon={detail.icon} skillName={detail.name} size={24} iconSize={12} />
-          <span className="truncate text-xs font-medium">{detail.name}</span>
+      <div className="flex items-center justify-between px-4 py-3.5">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <SkillIcon icon={detail.icon} skillName={detail.name} size={30} iconSize={14} />
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold text-text-primary">{detail.name}</div>
+            <div className="text-[10px] text-text-secondary">Skill detail</div>
+          </div>
         </div>
         <button
           onClick={onClose}
-          className="shrink-0 rounded p-1 text-text-secondary transition hover:bg-bg-tertiary/50"
+          className="shrink-0 rounded-full bg-bg-primary p-1.5 text-text-secondary transition hover:bg-bg-tertiary hover:text-text-primary"
         >
           <X size={14} />
         </button>
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-4">
+      <div className="flex-1 space-y-4 overflow-y-auto px-4 pb-4">
         {/* Meta */}
-        <div className="space-y-2">
+        <div className="space-y-3 rounded-[16px] bg-bg-primary/55 p-3">
           <p className="text-xs text-text-secondary">{detail.description}</p>
 
           {/* Version selector (Square mode) or static version badge */}
           {isSquareMode && detail.versions.length > 1 ? (
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <select
                 value={detail.selected_version}
                 onChange={(e) =>
                   onVersionChange?.(detail.name, e.target.value)
                 }
-                className="rounded border border-border bg-bg-primary px-2 py-1 text-[11px] text-text-primary outline-none focus:border-accent"
+                className="rounded-full bg-white/70 px-2.5 py-1 text-[11px] text-text-primary outline-none transition focus:bg-white/90 focus:shadow-[0_0_0_2px_rgba(139,92,246,0.16)]"
               >
                 {detail.versions.map((v) => (
                   <option key={v.version} value={v.version}>
@@ -161,14 +210,15 @@ export default function SkillDetailDrawer({
                   </option>
                 ))}
               </select>
-              <span className="flex items-center gap-0.5 text-[10px] text-text-secondary">
+              <span className="flex items-center gap-0.5 rounded-full bg-white/70 px-2 py-1 text-[10px] text-text-secondary">
                 <Hash size={9} />
                 {detail.usage_count_total} uses
               </span>
+              {actionControls}
             </div>
           ) : (
             <div className="flex flex-wrap items-center gap-2 text-[10px]">
-              <span className="flex items-center gap-1 rounded bg-bg-tertiary px-1.5 py-0.5 text-text-secondary">
+              <span className="flex items-center gap-1 rounded-full bg-white/70 px-2 py-0.5 text-text-secondary">
                 v{detail.selected_version}
               </span>
               {detail.versions.length > 1 && (
@@ -176,10 +226,11 @@ export default function SkillDetailDrawer({
                   ({detail.versions.length} versions)
                 </span>
               )}
-              <span className="flex items-center gap-0.5 text-text-secondary">
+              <span className="flex items-center gap-0.5 rounded-full bg-white/70 px-2 py-0.5 text-text-secondary">
                 <Hash size={9} />
                 {detail.usage_count_total} uses
               </span>
+              {actionControls}
             </div>
           )}
 
@@ -189,7 +240,7 @@ export default function SkillDetailDrawer({
               {detail.tags.map((tag) => (
                 <span
                   key={tag}
-                  className="flex items-center gap-0.5 rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent"
+                  className="flex items-center gap-0.5 rounded-full bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent"
                 >
                   <Tag size={8} />
                   {tag}
@@ -224,75 +275,27 @@ export default function SkillDetailDrawer({
             )
           )}
 
-          {/* Install / Uninstall button (Square mode) */}
+          {/* Install / Uninstall status (Square mode) */}
           {isSquareMode && (
             <div className="space-y-1.5">
               {/* Case: viewing other version while one is installed */}
               {viewingOtherVersion && (
-                <div className="flex items-center gap-1.5 rounded bg-warning/10 px-2 py-1.5 text-[11px] text-warning">
+                <div className="flex items-center gap-1.5 rounded-[12px] bg-warning/10 px-2 py-1.5 text-[11px] text-warning">
                   <AlertTriangle size={12} />
                   <span>
-                    v{detail.installed_version} is currently installed. Uninstall it first.
+                    当前已安装 v{detail.installed_version}，请先卸载。
                   </span>
                 </div>
               )}
 
-              {!detail.installed ? (
-                // Not installed → Install
-                <button
-                  onClick={() => onInstall?.(detail.selected_skill_id)}
-                  disabled={actionLoading || detail.enabled === false}
-                  className="flex w-full items-center justify-center gap-1.5 rounded bg-accent px-3 py-1.5 text-xs font-medium text-white transition hover:bg-accent/90 disabled:opacity-50"
-                >
-                  {actionLoading ? (
-                    <Loader2 size={13} className="animate-spin" />
-                  ) : (
-                    <Download size={13} />
-                  )}
-                  Install
-                </button>
-              ) : (
-                // Installed → Uninstall (whether same or different version)
-                <button
-                  onClick={() => onUninstall?.(detail.selected_skill_id)}
-                  disabled={actionLoading}
-                  className="flex w-full items-center justify-center gap-1.5 rounded bg-danger/10 px-3 py-1.5 text-xs font-medium text-danger transition hover:bg-danger/20 disabled:opacity-50"
-                >
-                  {actionLoading ? (
-                    <Loader2 size={13} className="animate-spin" />
-                  ) : (
-                    <Trash2 size={13} />
-                  )}
-                  {viewingOtherVersion
-                    ? `Uninstall v${detail.installed_version}`
-                    : "Uninstall"}
-                </button>
-              )}
-
               {/* Action error */}
               {actionError && (
-                <div className="flex items-center gap-1.5 rounded bg-danger/10 px-2 py-1.5 text-[11px] text-danger">
+                <div className="flex items-center gap-1.5 rounded-[12px] bg-danger/10 px-2 py-1.5 text-[11px] text-danger">
                   <XCircle size={12} className="shrink-0" />
                   <span>{actionError}</span>
                 </div>
               )}
 
-              {/* Admin: global delete */}
-              {onDeleteGlobal && (
-                <button
-                  onClick={() => {
-                    const ok = window.confirm(
-                      `Delete "${detail.name}" from system?\n\nThis will:\n- Remove the skill from the system catalog\n- Uninstall it from ALL users\n- This action cannot be undone`,
-                    );
-                    if (ok) onDeleteGlobal(detail.selected_skill_id);
-                  }}
-                  disabled={actionLoading}
-                  className="flex w-full items-center justify-center gap-1.5 rounded border border-danger/30 px-3 py-1.5 text-xs font-medium text-danger transition hover:bg-danger/10 disabled:opacity-50"
-                >
-                  <Trash2 size={13} />
-                  Delete from System
-                </button>
-              )}
             </div>
           )}
         </div>
@@ -304,9 +307,11 @@ export default function SkillDetailDrawer({
               <FileText size={12} />
               SKILL.md
             </h4>
-            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-bg-primary p-2.5 text-[11px] text-text-primary">
-              {detail.readme_content}
-            </pre>
+            <div className="max-h-[420px] overflow-auto rounded-[16px] bg-bg-primary/55 p-3">
+              <div className="chat-prose">
+                <MessageMarkdown>{detail.readme_content}</MessageMarkdown>
+              </div>
+            </div>
           </div>
         )}
 
@@ -317,7 +322,7 @@ export default function SkillDetailDrawer({
               <Folder size={12} />
               Package Tree
             </h4>
-            <div className="rounded border border-border bg-bg-primary p-2">
+            <div className="rounded-[16px] bg-bg-primary/55 p-3">
               {detail.tree.map((node) => (
                 <TreeNodeItem key={node.path} node={node} />
               ))}

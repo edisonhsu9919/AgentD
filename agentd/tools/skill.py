@@ -88,9 +88,15 @@ class SkillTool(BaseTool):
         if action == "list":
             return self._list_skills(skills_dir, disabled)
         elif action == "load":
-            skill_name = kwargs.get("name")
+            skill_name = self._normalize_skill_name(kwargs.get("name"))
             if not skill_name:
-                return {"output": "name is required for action 'load'", "is_error": True}
+                return {
+                    "output": (
+                        "name is required for action 'load'. Pass the bare installed "
+                        "skill name in the name field, for example: pdf-rename"
+                    ),
+                    "is_error": True,
+                }
             if skill_name in disabled:
                 return {"output": f"Skill '{skill_name}' is disabled for your account", "is_error": True}
             return self._load_skill(skills_dir, skill_name, ctx)
@@ -159,7 +165,14 @@ class SkillTool(BaseTool):
         skill_dir = os.path.join(skills_dir, safe_name)
         skill_md = os.path.join(skill_dir, "SKILL.md")
         if not os.path.isfile(skill_md):
-            return {"output": f"Skill not found: {skill_name}", "is_error": True}
+            return {
+                "output": (
+                    f"Skill not found: {skill_name}. The name field must be the "
+                    "bare installed skill name without extra quotes, for example: "
+                    "pdf-rename"
+                ),
+                "is_error": True,
+            }
 
         try:
             with open(skill_md, "r", encoding="utf-8") as f:
@@ -182,6 +195,17 @@ class SkillTool(BaseTool):
             "output": f"[Skill: {skill_name} v{version}]\n\n{content}",
             "is_error": False,
         }
+
+    @staticmethod
+    def _normalize_skill_name(skill_name: Any) -> Any:
+        """Apply minimal normalization for quoted skill names."""
+        if not isinstance(skill_name, str):
+            return skill_name
+
+        normalized = skill_name.strip()
+        if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in ("'", '"'):
+            normalized = normalized[1:-1].strip()
+        return normalized
 
     @staticmethod
     def _materialize_skill_scripts(

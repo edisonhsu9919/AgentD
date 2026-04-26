@@ -47,9 +47,11 @@ interface SettingsState {
   // CRUD actions
   createConfig: (data: ModelConfigCreate) => Promise<void>;
   updateConfig: (id: string, data: ModelConfigUpdate) => Promise<void>;
+  deleteConfig: (id: string) => Promise<void>;
   enableConfig: (id: string) => Promise<void>;
   disableConfig: (id: string) => Promise<void>;
   setDefaultConfig: (id: string) => Promise<void>;
+  unsetDefaultConfig: (id: string) => Promise<void>;
 
   // Refresh health + configs + runtime together
   refreshStatus: () => Promise<void>;
@@ -169,6 +171,22 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }
   },
 
+  deleteConfig: async (id: string) => {
+    try {
+      await apiFetch<{ deleted: boolean; id: string }>(`/admin/model-configs/${id}`, {
+        method: "DELETE",
+      });
+      set((state) => ({
+        editingConfig:
+          state.editingConfig?.id === id ? null : state.editingConfig,
+        isCreating: state.editingConfig?.id === id ? false : state.isCreating,
+      }));
+      await get().refreshStatus();
+    } catch {
+      // silent
+    }
+  },
+
   enableConfig: async (id: string) => {
     try {
       await apiFetch<ModelConfig>(`/admin/model-configs/${id}/enable`, {
@@ -194,6 +212,17 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setDefaultConfig: async (id: string) => {
     try {
       await apiFetch<ModelConfig>(`/admin/model-configs/${id}/set-default`, {
+        method: "POST",
+      });
+      await get().refreshStatus();
+    } catch {
+      // silent
+    }
+  },
+
+  unsetDefaultConfig: async (id: string) => {
+    try {
+      await apiFetch<ModelConfig>(`/admin/model-configs/${id}/unset-default`, {
         method: "POST",
       });
       await get().refreshStatus();

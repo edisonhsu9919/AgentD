@@ -32,15 +32,15 @@ export default function TaskPlanItem({ step }: TaskPlanItemProps) {
 
   return (
     <div
-      className={`flex gap-2 rounded px-2 py-1.5 ${
-        isActive ? "bg-accent/5" : ""
+      className={`flex gap-2 rounded-[16px] px-3 py-2 ${
+        isActive ? "bg-accent/8" : "bg-white/72"
       }`}
     >
       <Icon size={14} className={`mt-0.5 shrink-0 ${config.iconClass}`} />
       <div className="min-w-0 flex-1">
-        <span className={`text-xs ${config.titleClass}`}>{step.title}</span>
+        <span className={`text-[12px] ${config.titleClass}`}>{step.title}</span>
         {isActive && step.detail && (
-          <p className="mt-0.5 text-xs leading-relaxed text-text-secondary">
+          <p className="mt-0.5 text-[12px] leading-6 text-text-secondary">
             {step.detail}
           </p>
         )}

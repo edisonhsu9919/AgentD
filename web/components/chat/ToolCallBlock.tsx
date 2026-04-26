@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Terminal,
   FileText,
@@ -282,6 +282,7 @@ interface ToolCallBlockProps {
   output?: string;
   isError?: boolean;
   status?: string;
+  autoCollapseOnComplete?: boolean;
 }
 
 export default function ToolCallBlock({
@@ -290,48 +291,77 @@ export default function ToolCallBlock({
   output,
   isError,
   status,
+  autoCollapseOnComplete = true,
 }: ToolCallBlockProps) {
-  const [expanded, setExpanded] = useState(false);
+  const isRunning = status === "running" || status === "pending";
+  const [expanded, setExpanded] = useState(isRunning);
+  const completionHandledRef = useRef(false);
   const Icon = toolIcons[toolName] || Code;
+  const isExpanded = expanded || isRunning || !autoCollapseOnComplete;
+
+  useEffect(() => {
+    if (!autoCollapseOnComplete) {
+      completionHandledRef.current = false;
+      return;
+    }
+
+    if (isRunning) {
+      completionHandledRef.current = false;
+      return;
+    }
+
+    if (completionHandledRef.current) return;
+    if (!status && output === undefined) return;
+
+    const timer = window.setTimeout(() => {
+      setExpanded(false);
+      completionHandledRef.current = true;
+    }, 900);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [autoCollapseOnComplete, isRunning, output, status]);
 
   const statusIcon =
-    status === "running" || status === "pending" ? (
-      <Loader2 size={14} className="animate-spin text-accent" />
+    isRunning ? (
+      <Loader2 size={12} className="animate-spin text-accent" />
     ) : isError ? (
-      <XCircle size={14} className="text-danger" />
+      <XCircle size={12} className="text-danger" />
     ) : (
-      <CheckCircle size={14} className="text-success" />
+      <CheckCircle size={12} className="text-success" />
     );
 
-  const inputSummary = getInputSummary(toolName, input);
   const outputSummary = getOutputSummary(toolName, output, isError);
 
   return (
-    <div className="my-1 rounded border border-border bg-bg-primary text-sm">
+    <div className="my-1.5">
       <button
-        onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-bg-tertiary/30"
+        onClick={() => setExpanded((prev) => !prev)}
+        className="flex w-full items-center gap-2 py-1 text-left text-[12px] text-text-secondary transition hover:text-text-primary"
       >
-        {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        <Icon size={14} className="text-text-secondary" />
-        <span className="font-medium text-text-secondary">{toolName}</span>
-        <span className="flex-1 truncate text-xs text-text-secondary/70">
-          {inputSummary}
+        {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-bg-primary/80">
+          <Icon size={12} className="text-text-secondary" />
+        </div>
+        <span className="truncate font-mono text-[12px] font-medium text-text-primary">
+          {toolName}
         </span>
+        <span className="flex-1" />
         {outputSummary && (
-          <span className="shrink-0 text-xs text-text-secondary/50">
+          <span className="shrink-0 text-[11px] text-text-secondary/60">
             {outputSummary}
           </span>
         )}
         {statusIcon}
       </button>
 
-      {expanded && (
-        <div className="min-w-0 border-t border-border px-3 py-2">
+      {isExpanded && (
+        <div className="ml-7 mt-1 rounded-[16px] bg-bg-primary/70 px-3 py-2.5">
           {/* Input section */}
           <div className="mb-2">
-            <span className="text-xs text-text-secondary">Input:</span>
-            <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-bg-secondary p-2 text-xs">
+            <span className="text-[11px] text-text-secondary">Input</span>
+            <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-[12px] bg-bg-secondary p-2 text-[11px]">
               {JSON.stringify(input, null, 2)}
             </pre>
           </div>
@@ -339,7 +369,7 @@ export default function ToolCallBlock({
           {/* Output section — structured or fallback */}
           {output !== undefined && (
             <div>
-              <span className="text-xs text-text-secondary">Output:</span>
+              <span className="text-[11px] text-text-secondary">Output</span>
               <StructuredOutput
                 toolName={toolName}
                 output={output}

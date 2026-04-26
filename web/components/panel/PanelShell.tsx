@@ -13,74 +13,45 @@ export default function PanelShell({ sessionId }: PanelShellProps) {
   const open = usePanelStore((s) => s.open);
   const closePanel = usePanelStore((s) => s.closePanel);
   const activeType = usePanelStore((s) => s.activeType);
-  const tabs = usePanelStore((s) => s.tabs);
-  const filePreviewPath = usePanelStore((s) => s.filePreviewPath);
-  const knowledgeDocTitle = usePanelStore((s) => s.knowledgeDocTitle);
-  const fileInspect = usePanelStore((s) => s.fileInspect);
-
-  if (!open) return null;
-
-  const isKnowledge = filePreviewPath?.startsWith("knowledge:");
-
-  // Build display title from active type
-  const activeTab = tabs.find((t) => t.id === activeType);
-  const displayTitle =
-    activeType === "file_preview" && filePreviewPath
-      ? isKnowledge
-        ? knowledgeDocTitle || "Knowledge Document"
-        : filePreviewPath.split("/").pop() || "File Preview"
-      : activeTab?.title || "Work Panel";
-  const displaySubtitle =
-    activeType === "file_preview" && filePreviewPath
-      ? isKnowledge
-        ? fileInspect?.path || undefined
-        : filePreviewPath
-      : undefined;
 
   return (
-    <div className="fixed inset-y-0 right-0 z-40 flex w-[50vw] min-w-[400px] max-w-[800px] flex-col border-l border-border bg-bg-secondary shadow-2xl">
-      {/* Header */}
-      <div className="flex items-center justify-between border-b border-border px-3 py-2">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          {activeType ? (
-            <div className="min-w-0">
-              <div className="truncate text-xs font-medium text-text-primary">
-                {displayTitle}
-              </div>
-              {displaySubtitle && (
-                <div className="truncate text-[10px] text-text-secondary">
-                  {displaySubtitle}
-                </div>
-              )}
-            </div>
-          ) : (
-            <span className="text-xs font-medium text-text-secondary">
-              Work Panel
-            </span>
-          )}
+    <>
+      <div
+        className={`fixed inset-0 z-[90] bg-[rgba(42,41,51,0.08)] backdrop-blur-[1px] transition-opacity duration-300 ease-out ${
+          open ? "opacity-100" : "pointer-events-none opacity-0"
+        }`}
+        onClick={closePanel}
+      />
+
+      <div
+        className={`fixed inset-y-3 right-3 z-[100] flex w-[min(46vw,820px)] min-w-[360px] max-w-[820px] transform-gpu flex-col rounded-[18px] bg-white/97 shadow-[0_28px_90px_rgba(42,41,51,0.14)] backdrop-blur transition-transform duration-[460ms] ease-[cubic-bezier(0.2,0.8,0.2,1)] will-change-transform max-md:inset-x-3 max-md:w-auto max-md:min-w-0 ${
+          open
+            ? "translate-x-0"
+            : "pointer-events-none translate-x-[calc(100%+1.25rem)]"
+        }`}
+      >
+        <div className="relative px-3 pb-2 pt-3">
+          <div className="flex justify-start">
+            <PanelTabs />
+          </div>
+          <button
+            onClick={closePanel}
+            className="absolute right-3 top-3 inline-flex h-9 w-9 items-center justify-center rounded-full bg-bg-primary text-text-secondary transition hover:bg-bg-tertiary hover:text-text-primary"
+            title="关闭面板"
+          >
+            <X size={15} />
+          </button>
         </div>
 
-        <button
-          onClick={closePanel}
-          className="shrink-0 rounded p-1 text-text-secondary transition hover:bg-bg-tertiary/50 hover:text-text-primary"
-          title="Close panel"
-        >
-          <X size={14} />
-        </button>
+        <div className="flex-1 overflow-hidden">
+          {activeType ? (
+            <PanelRouter sessionId={sessionId} activeType={activeType} />
+          ) : (
+            <PanelEmptyState />
+          )}
+        </div>
       </div>
-
-      {/* Tabs strip */}
-      <PanelTabs />
-
-      {/* Content */}
-      <div className="flex-1 overflow-hidden">
-        {activeType ? (
-          <PanelRouter sessionId={sessionId} activeType={activeType} />
-        ) : (
-          <PanelEmptyState />
-        )}
-      </div>
-    </div>
+    </>
   );
 }
 
@@ -90,11 +61,10 @@ function PanelEmptyState() {
       <PanelRightClose size={32} className="text-text-secondary/30" />
       <div>
         <p className="text-sm font-medium text-text-secondary">
-          Work Panel
+          工作面板
         </p>
         <p className="mt-1 max-w-[240px] text-xs text-text-secondary/60">
-          Click a file to preview, or view task output here. Panel content
-          will appear when available.
+          文件预览、任务输出和应用视图都会收束到这里，内容可用时会自动切入对应标签。
         </p>
       </div>
     </div>

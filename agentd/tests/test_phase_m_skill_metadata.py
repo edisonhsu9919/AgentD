@@ -147,12 +147,13 @@ class TestSkillsMetadataLayerFormat(unittest.TestCase):
     def test_footer_mentions_skill_load(self):
         from agent.runtime import _load_skills_metadata_layer
         result = _load_skills_metadata_layer(self._make_skills("a"))
-        self.assertIn("skill load", result)
+        self.assertIn('action="load"', result)
+        self.assertIn('name":"pdf-rename', result)
 
     def test_footer_discourages_skill_list(self):
         from agent.runtime import _load_skills_metadata_layer
         result = _load_skills_metadata_layer(self._make_skills("a"))
-        self.assertIn("do NOT call `skill list`", result)
+        self.assertIn("Do NOT call `skill list`", result)
 
     def test_returns_empty_for_none(self):
         from agent.runtime import _load_skills_metadata_layer
@@ -217,11 +218,11 @@ class TestBuildSystemPromptSkillsIntegration(unittest.TestCase):
 
 
 class TestRolePromptNaturalRecall(unittest.TestCase):
-    """Verify build.md skill section teaches natural recall."""
+    """Verify assistant.md skill section teaches natural recall."""
 
     @classmethod
     def setUpClass(cls):
-        role_path = Path(__file__).parent.parent / "agent" / "prompts" / "roles" / "build.md"
+        role_path = Path(__file__).parent.parent / "agent" / "prompts" / "roles" / "assistant.md"
         cls.role_text = role_path.read_text(encoding="utf-8")
 
     def test_mentions_available_session_skills(self):
@@ -231,7 +232,8 @@ class TestRolePromptNaturalRecall(unittest.TestCase):
         self.assertIn("check the skill metadata already in your prompt", self.role_text)
 
     def test_teaches_skill_load_directly(self):
-        self.assertIn("skill load <name>", self.role_text)
+        self.assertIn('action="load"', self.role_text)
+        self.assertIn('name":"pdf-rename', self.role_text)
 
     def test_discourages_skill_list_as_first_step(self):
         self.assertIn("Do NOT", self.role_text)

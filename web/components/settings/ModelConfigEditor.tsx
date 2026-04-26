@@ -39,29 +39,37 @@ export default function ModelConfigEditor({
   const [contextWindow, setContextWindow] = useState("");
 
   useEffect(() => {
-    if (config) {
-      setName(config.name);
-      setModelType(config.model_type || "llm");
-      setProviderType(config.provider_type);
-      setBaseUrl(config.base_url);
-      setApiKey("");
-      setApiKeyChanged(false);
-      setModelId(config.model_id);
-      setIsEnabled(config.is_enabled);
-      setTimeoutSeconds(config.timeout_seconds?.toString() || "");
-      setContextWindow(config.context_window?.toString() || "");
-    } else {
-      setName("");
-      setModelType("llm");
-      setProviderType("openai_compatible");
-      setBaseUrl("");
-      setApiKey("");
-      setApiKeyChanged(false);
-      setModelId("");
-      setIsEnabled(true);
-      setTimeoutSeconds("");
-      setContextWindow("");
-    }
+    // Defer form-state sync to avoid cascading render lint errors while
+    // still rehydrating the editor when a different config is selected.
+    const timer = window.setTimeout(() => {
+      if (config) {
+        setName(config.name);
+        setModelType(config.model_type || "llm");
+        setProviderType(config.provider_type);
+        setBaseUrl(config.base_url);
+        setApiKey("");
+        setApiKeyChanged(false);
+        setModelId(config.model_id);
+        setIsEnabled(config.is_enabled);
+        setTimeoutSeconds(config.timeout_seconds?.toString() || "");
+        setContextWindow(config.context_window?.toString() || "");
+      } else {
+        setName("");
+        setModelType("llm");
+        setProviderType("openai_compatible");
+        setBaseUrl("");
+        setApiKey("");
+        setApiKeyChanged(false);
+        setModelId("");
+        setIsEnabled(true);
+        setTimeoutSeconds("");
+        setContextWindow("");
+      }
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
   }, [config, isCreating]);
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -106,18 +114,19 @@ export default function ModelConfigEditor({
   };
 
   const inputClass =
-    "w-full rounded border border-border bg-bg-primary px-2.5 py-1.5 text-xs text-text-primary outline-none placeholder:text-text-secondary focus:border-accent";
+    "w-full rounded-[14px] bg-bg-primary/70 px-3 py-2 text-xs text-text-primary outline-none placeholder:text-text-secondary/45 transition focus:bg-white/90 focus:shadow-[0_0_0_2px_rgba(139,92,246,0.16)]";
 
   return (
-    <div className="flex h-full flex-col border-l border-border bg-bg-secondary">
+    <div className="flex h-full flex-col rounded-[22px] bg-white/95 shadow-[0_24px_70px_rgba(15,23,42,0.12)] backdrop-blur">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-border px-3 py-2">
-        <span className="text-xs font-medium">
-          {isCreating ? "New Model Config" : "Edit Model Config"}
+      <div className="flex items-center justify-between px-4 py-3">
+        <span className="text-xs font-medium text-text-primary">
+          {isCreating ? "新建模型配置" : "编辑模型配置"}
         </span>
         <button
           onClick={onClose}
-          className="rounded p-1 text-text-secondary transition hover:bg-bg-tertiary/50"
+          className="rounded-full p-1.5 text-text-secondary transition hover:bg-bg-primary hover:text-text-primary"
+          title="关闭"
         >
           <X size={14} />
         </button>
@@ -126,11 +135,11 @@ export default function ModelConfigEditor({
       {/* Form */}
       <form
         onSubmit={handleSubmit}
-        className="flex-1 overflow-y-auto p-3 space-y-3"
+        className="flex-1 space-y-3 overflow-y-auto px-4 pb-4"
       >
         <div>
           <label className="mb-1 block text-[10px] font-medium text-text-secondary">
-            Name *
+            名称 *
           </label>
           <input
             type="text"
@@ -138,23 +147,23 @@ export default function ModelConfigEditor({
             onChange={(e) => setName(e.target.value)}
             required
             maxLength={128}
-            placeholder="e.g. GPT-4o Production"
+            placeholder="例如：GPT-4o Production"
             className={inputClass}
           />
         </div>
 
         <div>
           <label className="mb-1 block text-[10px] font-medium text-text-secondary">
-            Model Type *
+            模型类型 *
           </label>
-          <div className="flex gap-2">
+          <div className="flex rounded-full bg-bg-primary/70 p-1">
             <button
               type="button"
               onClick={() => setModelType("llm")}
-              className={`flex-1 rounded border px-2.5 py-1.5 text-xs font-medium transition ${
+              className={`flex-1 rounded-full px-2.5 py-1.5 text-xs font-medium transition ${
                 modelType === "llm"
-                  ? "border-blue-500 bg-blue-500/10 text-blue-400"
-                  : "border-border bg-bg-primary text-text-secondary hover:border-border/80"
+                  ? "bg-white text-blue-500 shadow-sm"
+                  : "text-text-secondary hover:text-text-primary"
               }`}
             >
               LLM
@@ -162,10 +171,10 @@ export default function ModelConfigEditor({
             <button
               type="button"
               onClick={() => setModelType("vlm")}
-              className={`flex-1 rounded border px-2.5 py-1.5 text-xs font-medium transition ${
+              className={`flex-1 rounded-full px-2.5 py-1.5 text-xs font-medium transition ${
                 modelType === "vlm"
-                  ? "border-purple-500 bg-purple-500/10 text-purple-400"
-                  : "border-border bg-bg-primary text-text-secondary hover:border-border/80"
+                  ? "bg-white text-purple-500 shadow-sm"
+                  : "text-text-secondary hover:text-text-primary"
               }`}
             >
               VLM
@@ -173,14 +182,14 @@ export default function ModelConfigEditor({
           </div>
           <p className="mt-0.5 text-[10px] text-text-secondary/60">
             {modelType === "vlm"
-              ? "Vision Language Model \u2014 for image understanding"
-              : "Large Language Model \u2014 main session model"}
+              ? "视觉语言模型，用于图片理解。"
+              : "大语言模型，用于主会话推理。"}
           </p>
         </div>
 
         <div>
           <label className="mb-1 block text-[10px] font-medium text-text-secondary">
-            Provider Type
+            Provider 类型
           </label>
           <input
             type="text"
@@ -213,7 +222,7 @@ export default function ModelConfigEditor({
           </label>
           {config && !apiKeyChanged && (
             <p className="mb-1 text-[10px] text-text-secondary">
-              Current:{" "}
+              当前：{" "}
               <code className="text-text-primary">{config.api_key_masked}</code>
             </p>
           )}
@@ -225,7 +234,7 @@ export default function ModelConfigEditor({
               if (!apiKeyChanged) setApiKeyChanged(true);
             }}
             maxLength={512}
-            placeholder={config ? "Enter new key to change" : "sk-..."}
+            placeholder={config ? "输入新 Key 后才会更新" : "sk-..."}
             className={inputClass}
           />
         </div>
@@ -247,7 +256,7 @@ export default function ModelConfigEditor({
 
         <div>
           <label className="mb-1 block text-[10px] font-medium text-text-secondary">
-            Timeout (seconds)
+            超时时间（秒）
           </label>
           <input
             type="number"
@@ -255,40 +264,40 @@ export default function ModelConfigEditor({
             onChange={(e) => setTimeoutSeconds(e.target.value)}
             min={1}
             max={600}
-            placeholder="Optional (1-600)"
+            placeholder="可选，1-600"
             className={inputClass}
           />
         </div>
 
         <div>
           <label className="mb-1 block text-[10px] font-medium text-text-secondary">
-            Context Window
+            上下文窗口
           </label>
           <input
             type="number"
             value={contextWindow}
             onChange={(e) => setContextWindow(e.target.value)}
             min={1}
-            placeholder="Optional max context tokens, e.g. 32768"
+            placeholder="可选，例如 32768"
             className={inputClass}
           />
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 rounded-[14px] bg-bg-primary/60 px-3 py-2">
           <input
             type="checkbox"
             id="mc_is_enabled"
             checked={isEnabled}
             onChange={(e) => setIsEnabled(e.target.checked)}
-            className="rounded border-border"
+            className="rounded accent-accent"
           />
           <label htmlFor="mc_is_enabled" className="text-xs text-text-primary">
-            Enabled
+            启用此配置
           </label>
         </div>
 
         {error && (
-          <div className="flex items-center gap-1.5 rounded bg-danger/10 px-2 py-1.5 text-[11px] text-danger">
+          <div className="flex items-center gap-1.5 rounded-[14px] bg-danger/10 px-3 py-2 text-[11px] text-danger">
             <XCircle size={12} className="shrink-0" />
             <span>{error}</span>
           </div>
@@ -297,10 +306,10 @@ export default function ModelConfigEditor({
         <button
           type="submit"
           disabled={loading || !name || !baseUrl || !modelId}
-          className="flex w-full items-center justify-center gap-1.5 rounded bg-accent px-3 py-1.5 text-xs font-medium text-white transition hover:bg-accent/90 disabled:opacity-50"
+          className="flex w-full items-center justify-center gap-1.5 rounded-full bg-accent px-3 py-2 text-xs font-medium text-white transition hover:bg-accent/90 disabled:opacity-50"
         >
           {loading && <Loader2 size={13} className="animate-spin" />}
-          {isCreating ? "Create" : "Save Changes"}
+          {isCreating ? "创建配置" : "保存修改"}
         </button>
       </form>
     </div>

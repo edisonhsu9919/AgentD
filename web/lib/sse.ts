@@ -2,7 +2,7 @@ import {
   fetchEventSource,
   EventStreamContentType,
 } from "@microsoft/fetch-event-source";
-import { API_URL } from "./constants";
+import { SSE_API_URL } from "./constants";
 import { getToken } from "./api";
 import type { SSEEvent } from "./types";
 
@@ -27,7 +27,7 @@ export function connectSSE(sessionId: string, handlers: SSEHandlers) {
   // Track whether we just processed a 'done' event (normal server close)
   let lastWasDone = false;
 
-  fetchEventSource(`${API_URL}/sessions/${sessionId}/events`, {
+  fetchEventSource(`${SSE_API_URL}/sessions/${sessionId}/events`, {
     method: "GET",
     headers: {
       Authorization: `Bearer ${token}`,

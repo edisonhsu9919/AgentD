@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 class SessionCreate(BaseModel):
     title: str = "New Session"
-    agent_id: str = "build"
+    agent_id: str = "assistant"
     model_id: Optional[str] = None
 
 

@@ -289,6 +289,29 @@ class TestExistingBehaviorPreserved:
         result = await tool.execute(ctx, action="load", name="nonexistent")
         assert result["is_error"] is True
         assert "not found" in result["output"].lower()
+        assert "bare installed skill name" in result["output"]
+
+    @pytest.mark.asyncio
+    @patch.object(SkillTool, "_get_disabled_skills", new_callable=AsyncMock, return_value=set())
+    async def test_load_quoted_name_normalizes_successfully(self, _mock_disabled, tmp_workspace, user_root, ctx):
+        _create_user_skill(user_root, "pdf-rename", version="1.1.0")
+
+        tool = SkillTool()
+        result = await tool.execute(ctx, action="load", name='  "pdf-rename"  ')
+
+        assert result["is_error"] is False
+        assert result["skill_name"] == "pdf-rename"
+        assert "[Skill: pdf-rename v1.1.0]" in result["output"]
+
+    @pytest.mark.asyncio
+    @patch.object(SkillTool, "_get_disabled_skills", new_callable=AsyncMock, return_value=set())
+    async def test_load_missing_name_returns_guidance(self, _mock_disabled, tmp_workspace, user_root, ctx):
+        tool = SkillTool()
+        result = await tool.execute(ctx, action="load")
+
+        assert result["is_error"] is True
+        assert "name is required for action 'load'" in result["output"]
+        assert "pdf-rename" in result["output"]
 
     @pytest.mark.asyncio
     @patch.object(SkillTool, "_get_disabled_skills", new_callable=AsyncMock, return_value=set())

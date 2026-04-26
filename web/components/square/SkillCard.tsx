@@ -14,30 +14,27 @@ export default function SkillCard({ card, selected, onSelect }: SkillCardProps) 
   return (
     <div
       role="button"
+      aria-pressed={selected}
       tabIndex={0}
       onClick={() => onSelect(card.name)}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") onSelect(card.name);
       }}
-      className={`flex cursor-pointer flex-col gap-2 rounded-lg border p-3 transition ${
-        selected
-          ? "border-accent/40 bg-accent/5"
-          : "border-border hover:border-accent/20 hover:bg-bg-tertiary/30"
-      }`}
+      className="flex h-[190px] cursor-pointer flex-col gap-3 rounded-[24px] bg-white/72 p-4 shadow-[0_12px_28px_rgba(42,41,51,0.045)] transition duration-200 ease-out hover:-translate-y-0.5 hover:bg-white/90 hover:shadow-[0_18px_42px_rgba(42,41,51,0.09)]"
     >
       {/* Top row: icon + name + status */}
       <div className="flex items-start gap-2.5">
-        <SkillIcon icon={card.icon} skillName={card.name} size={36} iconSize={16} />
+        <SkillIcon icon={card.icon} skillName={card.name} size={40} iconSize={17} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="truncate text-xs font-semibold">{card.name}</span>
+            <span className="truncate text-sm font-semibold text-text-primary">{card.name}</span>
             {card.installed && (
-              <span className="shrink-0 rounded bg-success/10 px-1.5 py-0.5 text-[10px] font-medium text-success">
+              <span className="shrink-0 rounded-full bg-success/10 px-1.5 py-0.5 text-[10px] font-medium text-success">
                 Installed
               </span>
             )}
             {card.enabled === false && (
-              <span className="shrink-0 rounded bg-danger/10 px-1.5 py-0.5 text-[10px] font-medium text-danger">
+              <span className="shrink-0 rounded-full bg-danger/10 px-1.5 py-0.5 text-[10px] font-medium text-danger">
                 Disabled
               </span>
             )}
@@ -51,19 +48,19 @@ export default function SkillCard({ card, selected, onSelect }: SkillCardProps) 
       </div>
 
       {/* Description */}
-      <p className="line-clamp-2 text-[11px] leading-relaxed text-text-secondary">
+      <p className="line-clamp-3 flex-1 text-xs leading-relaxed text-text-secondary">
         {card.description || "No description"}
       </p>
 
       {/* Footer: stats */}
-      <div className="flex items-center gap-3 text-[10px] text-text-secondary">
-        <span className="flex items-center gap-0.5">
+      <div className="mt-auto flex flex-wrap items-center gap-2 text-[10px] text-text-secondary">
+        <span className="flex items-center gap-0.5 rounded-full bg-bg-tertiary/80 px-2 py-0.5">
           <Hash size={9} />
           {card.usage_count_total} uses
         </span>
-        <span>v{card.latest_version}</span>
+        <span className="rounded-full bg-bg-tertiary/80 px-2 py-0.5">v{card.latest_version}</span>
         {card.available_versions.length > 1 && (
-          <span>{card.available_versions.length} versions</span>
+          <span className="rounded-full bg-bg-tertiary/80 px-2 py-0.5">{card.available_versions.length} versions</span>
         )}
       </div>
     </div>

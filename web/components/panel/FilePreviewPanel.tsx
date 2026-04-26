@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 import { usePanelStore } from "@/store/panel";
 import { useSettingsStore } from "@/store/settings";
 import { useWorkspaceStore } from "@/store/workspace";
@@ -10,7 +10,6 @@ import type { FileMeta, InspectResult } from "@/lib/types";
 import {
   Download,
   FileText,
-  Image as ImageIcon,
   File,
   ZoomIn,
   ZoomOut,
@@ -26,8 +25,7 @@ import {
   FolderInput,
   Loader2,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import MessageMarkdown from "@/components/chat/MessageMarkdown";
 
 interface FilePreviewPanelProps {
   sessionId: string;
@@ -48,12 +46,13 @@ export default function FilePreviewPanel({ sessionId }: FilePreviewPanelProps) {
   const [fileMeta, setFileMeta] = useState<FileMeta | null>(null);
   const [textContent, setTextContent] = useState<string | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [imageScale, setImageScale] = useState(1);
   const [importing, setImporting] = useState(false);
 
   // Importable file types
-  const IMPORTABLE_EXTS = new Set(["pdf", "docx", "pptx"]);
+  const IMPORTABLE_EXTS = new Set(["pdf", "docx", "pptx", "txt", "md"]);
   const currentExt = filePreviewPath?.split(".").pop()?.toLowerCase() || "";
   const canImport = !isKnowledgePreview && IMPORTABLE_EXTS.has(currentExt);
 
@@ -62,7 +61,7 @@ export default function FilePreviewPanel({ sessionId }: FilePreviewPanelProps) {
   const handleStartKnowledgeImport = async () => {
     if (!filePreviewPath || isKnowledgePreview) return;
     const ok = window.confirm(
-      "Import to Knowledge Base\n\nThis will extract text and generate metadata. Confirm to continue.",
+      "导入知识库\n\n系统会提取文件内容并生成元数据草稿，确认继续吗？",
     );
     if (!ok) return;
 
@@ -70,7 +69,7 @@ export default function FilePreviewPanel({ sessionId }: FilePreviewPanelProps) {
     try {
       await startImportDraft(sessionId, filePreviewPath);
     } catch {
-      showToast("error", "Failed to start import");
+      showToast("error", "启动导入失败");
     } finally {
       setImporting(false);
     }
@@ -88,6 +87,10 @@ export default function FilePreviewPanel({ sessionId }: FilePreviewPanelProps) {
     if (imageUrl) {
       URL.revokeObjectURL(imageUrl);
       setImageUrl(null);
+    }
+    if (pdfUrl) {
+      URL.revokeObjectURL(pdfUrl);
+      setPdfUrl(null);
     }
 
     if (!filePreviewPath) return;
@@ -118,6 +121,15 @@ export default function FilePreviewPanel({ sessionId }: FilePreviewPanelProps) {
           );
           const blob = await res.blob();
           if (!cancelled) setImageUrl(URL.createObjectURL(blob));
+        } else if (meta.preview_mode === "pdf") {
+          const res = await apiFetchRaw(
+            `/sessions/${sessionId}/workspace/file?path=${encodeURIComponent(filePreviewPath)}&mode=binary`,
+          );
+          const blob = await res.blob();
+          const pdfBlob = blob.type === "application/pdf"
+            ? blob
+            : new Blob([blob], { type: "application/pdf" });
+          if (!cancelled) setPdfUrl(URL.createObjectURL(pdfBlob));
         }
       } catch {
         // non-fatal
@@ -137,6 +149,7 @@ export default function FilePreviewPanel({ sessionId }: FilePreviewPanelProps) {
   useEffect(() => {
     return () => {
       if (imageUrl) URL.revokeObjectURL(imageUrl);
+      if (pdfUrl) URL.revokeObjectURL(pdfUrl);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -153,7 +166,7 @@ export default function FilePreviewPanel({ sessionId }: FilePreviewPanelProps) {
   if (isKnowledgePreview) {
     return (
       <div className="flex h-full flex-col">
-        <div className="flex items-center justify-between border-b border-border px-3 py-1.5">
+        <div className="flex items-center justify-between px-4 py-2">
           <div className="flex items-center gap-2 text-[10px] text-text-secondary">
             <BookOpen size={12} className="text-accent" />
             <span>{knowledgeDocTitle || "Knowledge Document"}</span>
@@ -179,7 +192,7 @@ export default function FilePreviewPanel({ sessionId }: FilePreviewPanelProps) {
                   URL.revokeObjectURL(url);
                 } catch { /* ignore */ }
               }}
-              className="rounded p-1 text-text-secondary transition hover:bg-bg-tertiary/50"
+              className="rounded-full p-1.5 text-text-secondary transition hover:bg-bg-tertiary/70"
               title="Download original file"
             >
               <Download size={13} />
@@ -195,7 +208,7 @@ export default function FilePreviewPanel({ sessionId }: FilePreviewPanelProps) {
             <div className="space-y-4">
               {/* Metadata card */}
               {fileInspect?.metadata && (
-                <div className="rounded-lg border border-border/50 bg-bg-primary/30 p-3 space-y-1.5 text-xs">
+                <div className="space-y-1.5 rounded-[14px] bg-bg-primary/55 p-3 text-xs">
                   {fileInspect.metadata.description && (
                     <p className="text-text-secondary">{fileInspect.metadata.description}</p>
                   )}
@@ -213,10 +226,8 @@ export default function FilePreviewPanel({ sessionId }: FilePreviewPanelProps) {
                 </div>
               )}
               {/* Markdown content */}
-              <div className="prose prose-sm prose-invert max-w-none">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {knowledgeDocContent}
-                </ReactMarkdown>
+              <div className="chat-prose">
+                <MessageMarkdown>{knowledgeDocContent}</MessageMarkdown>
               </div>
             </div>
           ) : (
@@ -231,25 +242,30 @@ export default function FilePreviewPanel({ sessionId }: FilePreviewPanelProps) {
 
   const ext = filePreviewPath.split(".").pop()?.toLowerCase() || "";
   const isMarkdown = ext === "md" || ext === "mdx";
+  const fileName = filePreviewPath.split("/").pop() || filePreviewPath;
 
   return (
     <div className="flex h-full flex-col">
       {/* Toolbar */}
-      <div className="flex items-center justify-between border-b border-border px-3 py-1.5">
-        <div className="flex items-center gap-2 text-[10px] text-text-secondary">
+      <div className="flex items-center justify-between gap-3 px-4 py-2">
+        <div className="flex min-w-0 items-center gap-2 text-[10px] text-text-secondary">
+          <FileText size={12} className="shrink-0 text-accent" />
+          <span className="truncate text-[11px] font-medium text-text-primary" title={filePreviewPath}>
+            {fileName}
+          </span>
           {fileMeta && (
             <>
-              <span>{fileMeta.extension || ext}</span>
-              <span>{formatSize(fileMeta.size)}</span>
+              <span className="shrink-0 text-text-secondary/60">{fileMeta.extension || ext}</span>
+              <span className="shrink-0 text-text-secondary/60">{formatSize(fileMeta.size)}</span>
             </>
           )}
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex shrink-0 items-center gap-1">
           {fileMeta?.preview_mode === "image" && imageUrl && (
             <>
               <button
                 onClick={() => setImageScale((s) => Math.max(0.25, s - 0.25))}
-                className="rounded p-1 text-text-secondary transition hover:bg-bg-tertiary/50"
+                className="rounded-full p-1.5 text-text-secondary transition hover:bg-bg-tertiary/70"
                 title="Zoom out"
               >
                 <ZoomOut size={13} />
@@ -259,14 +275,14 @@ export default function FilePreviewPanel({ sessionId }: FilePreviewPanelProps) {
               </span>
               <button
                 onClick={() => setImageScale((s) => Math.min(4, s + 0.25))}
-                className="rounded p-1 text-text-secondary transition hover:bg-bg-tertiary/50"
+                className="rounded-full p-1.5 text-text-secondary transition hover:bg-bg-tertiary/70"
                 title="Zoom in"
               >
                 <ZoomIn size={13} />
               </button>
               <button
                 onClick={() => setImageScale(1)}
-                className="rounded p-1 text-text-secondary transition hover:bg-bg-tertiary/50"
+                className="rounded-full p-1.5 text-text-secondary transition hover:bg-bg-tertiary/70"
                 title="Reset zoom"
               >
                 <Maximize2 size={13} />
@@ -275,7 +291,7 @@ export default function FilePreviewPanel({ sessionId }: FilePreviewPanelProps) {
           )}
           <button
             onClick={() => downloadFile(sessionId, filePreviewPath)}
-            className="rounded p-1 text-text-secondary transition hover:bg-bg-tertiary/50"
+            className="rounded-full p-1.5 text-text-secondary transition hover:bg-bg-tertiary/70"
             title="Download"
           >
             <Download size={13} />
@@ -288,14 +304,14 @@ export default function FilePreviewPanel({ sessionId }: FilePreviewPanelProps) {
               title="Import to knowledge base"
             >
               {importing ? <Loader2 size={12} className="animate-spin" /> : <FolderInput size={12} />}
-              <span className="hidden sm:inline">{importing ? "Importing..." : "Import"}</span>
+              <span className="hidden sm:inline">{importing ? "导入中..." : "导入"}</span>
             </button>
           )}
         </div>
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-auto p-4">
+      <div className="flex-1 overflow-auto px-4 pb-4 pt-2">
         {loading || fileInspectLoading ? (
           <div className="flex items-center justify-center py-12">
             <div className="h-5 w-5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
@@ -305,16 +321,19 @@ export default function FilePreviewPanel({ sessionId }: FilePreviewPanelProps) {
             {/* Text preview */}
             {fileMeta?.preview_mode === "text" && textContent !== null && (
               isMarkdown ? (
-                <div className="prose prose-sm prose-invert max-w-none">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {textContent}
-                  </ReactMarkdown>
+                <div className="chat-prose">
+                  <MessageMarkdown>{textContent}</MessageMarkdown>
                 </div>
               ) : (
                 <pre className="whitespace-pre-wrap break-words text-xs text-text-primary font-mono">
                   {textContent}
                 </pre>
               )
+            )}
+
+            {/* PDF preview with browser-native full-page viewer */}
+            {fileMeta?.preview_mode === "pdf" && pdfUrl && (
+              <PdfPreviewFrame url={pdfUrl} title={fileName} />
             )}
 
             {/* Image preview with zoom */}
@@ -331,7 +350,7 @@ export default function FilePreviewPanel({ sessionId }: FilePreviewPanelProps) {
             )}
 
             {/* Inspectable file: structured card */}
-            {fileInspect?.inspectable && (
+            {fileInspect?.inspectable && fileMeta?.preview_mode !== "pdf" && (
               <InspectCard
                 inspect={fileInspect}
                 sessionId={sessionId}
@@ -342,8 +361,8 @@ export default function FilePreviewPanel({ sessionId }: FilePreviewPanelProps) {
               />
             )}
 
-            {/* PDF: inspect card + download */}
-            {fileMeta?.preview_mode === "pdf" && !fileInspect?.inspectable && (
+            {/* PDF fallback */}
+            {fileMeta?.preview_mode === "pdf" && !pdfUrl && (
               <DownloadPrompt
                 icon={<File size={28} />}
                 label="PDF Document"
@@ -384,8 +403,6 @@ function InspectCard({ inspect, sessionId, path, canImport, importing, onImport 
   inspect: InspectResult; sessionId: string; path: string;
   canImport?: boolean; importing?: boolean; onImport?: () => void;
 }) {
-  const downloadFile = useWorkspaceStore((s) => s.downloadFile);
-
   let card: React.ReactNode = null;
   if (inspect.kind === "pdf") card = <PDFInspectCard inspect={inspect} sessionId={sessionId} path={path} />;
   else if (inspect.kind === "office" && inspect.office_kind === "docx") card = <DocxCard inspect={inspect} />;
@@ -394,7 +411,7 @@ function InspectCard({ inspect, sessionId, path, canImport, importing, onImport 
   else if (inspect.kind === "email") card = <EmlCard inspect={inspect} />;
   else if (inspect.kind === "image") card = null;
   else card = (
-    <div className="rounded-lg border border-border bg-bg-primary p-4">
+    <div className="rounded-[14px] bg-bg-primary/55 p-4">
       <pre className="text-xs text-text-secondary">{JSON.stringify(inspect, null, 2)}</pre>
     </div>
   );
@@ -406,10 +423,10 @@ function InspectCard({ inspect, sessionId, path, canImport, importing, onImport 
         <button
           onClick={onImport}
           disabled={importing}
-          className="flex w-full items-center justify-center gap-2 rounded-lg border border-accent/30 bg-accent/5 px-4 py-2 text-xs font-medium text-accent transition hover:bg-accent/10 disabled:opacity-50"
+          className="flex w-full items-center justify-center gap-2 rounded-full bg-accent/10 px-4 py-2 text-xs font-medium text-accent transition hover:bg-accent/14 disabled:opacity-50"
         >
           {importing ? <Loader2 size={14} className="animate-spin" /> : <FolderInput size={14} />}
-          {importing ? "Importing..." : "Import to Knowledge Base"}
+          {importing ? "导入中..." : "导入知识库"}
         </button>
       )}
     </div>
@@ -422,7 +439,7 @@ function PDFInspectCard({ inspect, sessionId, path }: { inspect: InspectResult; 
 
   return (
     <div className="space-y-3">
-      <div className="rounded-lg border border-border bg-bg-primary p-4 space-y-3">
+      <div className="space-y-3 rounded-[14px] bg-bg-primary/55 p-4">
         <div className="flex items-center gap-2">
           <File size={18} className="text-red-400" />
           <span className="text-sm font-medium text-text-primary">PDF Document</span>
@@ -456,7 +473,7 @@ function PDFInspectCard({ inspect, sessionId, path }: { inspect: InspectResult; 
         )}
 
         {inspect.text_sample && (
-          <div className="rounded border border-border bg-bg-secondary p-2">
+          <div className="rounded-[12px] bg-white/62 p-2">
             <div className="mb-1 text-[10px] font-medium text-text-secondary">Preview</div>
             <p className="text-xs text-text-primary line-clamp-6 whitespace-pre-wrap">{inspect.text_sample}</p>
           </div>
@@ -477,9 +494,23 @@ function PDFInspectCard({ inspect, sessionId, path }: { inspect: InspectResult; 
   );
 }
 
+function PdfPreviewFrame({ url, title }: { url: string; title: string }) {
+  return (
+    <div className="flex h-full min-h-[640px] flex-col rounded-[14px] bg-bg-primary/55 p-2">
+      <div className="flex min-h-0 flex-1 overflow-hidden rounded-[12px] bg-white shadow-[0_14px_42px_rgba(23,23,37,0.08)]">
+        <iframe
+          src={`${url}#toolbar=0&navpanes=0&scrollbar=1&view=FitH`}
+          title={title}
+          className="h-full min-h-[640px] w-full bg-white"
+        />
+      </div>
+    </div>
+  );
+}
+
 function DocxCard({ inspect }: { inspect: InspectResult }) {
   return (
-    <div className="rounded-lg border border-border bg-bg-primary p-4 space-y-3">
+    <div className="space-y-3 rounded-[14px] bg-bg-primary/55 p-4">
       <div className="flex items-center gap-2">
         <BookOpen size={18} className="text-blue-400" />
         <span className="text-sm font-medium text-text-primary">Word Document</span>
@@ -512,7 +543,7 @@ function DocxCard({ inspect }: { inspect: InspectResult }) {
       )}
 
       {inspect.text_sample && (
-        <div className="rounded border border-border bg-bg-secondary p-2">
+        <div className="rounded-[12px] bg-white/62 p-2">
           <div className="mb-1 text-[10px] font-medium text-text-secondary">Preview</div>
           <p className="text-xs text-text-primary line-clamp-6 whitespace-pre-wrap">{inspect.text_sample}</p>
         </div>
@@ -523,7 +554,7 @@ function DocxCard({ inspect }: { inspect: InspectResult }) {
 
 function XlsxCard({ inspect }: { inspect: InspectResult }) {
   return (
-    <div className="rounded-lg border border-border bg-bg-primary p-4 space-y-3">
+    <div className="space-y-3 rounded-[14px] bg-bg-primary/55 p-4">
       <div className="flex items-center gap-2">
         <Table size={18} className="text-green-400" />
         <span className="text-sm font-medium text-text-primary">Excel Spreadsheet</span>
@@ -533,7 +564,7 @@ function XlsxCard({ inspect }: { inspect: InspectResult }) {
       </div>
 
       {inspect.sheets && inspect.sheets.map((sheet, si) => (
-        <div key={si} className="rounded border border-border bg-bg-secondary p-2 space-y-2">
+        <div key={si} className="space-y-2 rounded-[12px] bg-white/62 p-2">
           <div className="flex items-center gap-1.5">
             <Layers size={12} className="text-green-400" />
             <span className="text-xs font-medium text-text-primary">{sheet.name}</span>
@@ -544,7 +575,7 @@ function XlsxCard({ inspect }: { inspect: InspectResult }) {
             <div className="overflow-x-auto">
               <table className="w-full text-[11px]">
                 <thead>
-                  <tr className="border-b border-border">
+                  <tr className="bg-bg-primary/45">
                     {sheet.header_row.map((h, i) => (
                       <th key={i} className="px-2 py-1 text-left font-medium text-text-secondary">{h}</th>
                     ))}
@@ -552,7 +583,7 @@ function XlsxCard({ inspect }: { inspect: InspectResult }) {
                 </thead>
                 <tbody>
                   {sheet.sample_rows?.map((row, ri) => (
-                    <tr key={ri} className="border-b border-border/50">
+                    <tr key={ri} className="odd:bg-white/30">
                       {row.map((cell, ci) => (
                         <td key={ci} className="px-2 py-0.5 text-text-primary">{cell}</td>
                       ))}
@@ -570,7 +601,7 @@ function XlsxCard({ inspect }: { inspect: InspectResult }) {
 
 function PptxCard({ inspect }: { inspect: InspectResult }) {
   return (
-    <div className="rounded-lg border border-border bg-bg-primary p-4 space-y-3">
+    <div className="space-y-3 rounded-[14px] bg-bg-primary/55 p-4">
       <div className="flex items-center gap-2">
         <Presentation size={18} className="text-orange-400" />
         <span className="text-sm font-medium text-text-primary">Presentation</span>
@@ -580,7 +611,7 @@ function PptxCard({ inspect }: { inspect: InspectResult }) {
       </div>
 
       {inspect.slides && inspect.slides.map((slide) => (
-        <div key={slide.number} className="flex gap-2 rounded border border-border bg-bg-secondary p-2">
+        <div key={slide.number} className="flex gap-2 rounded-[12px] bg-white/62 p-2">
           <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-orange-400/10 text-[10px] font-medium text-orange-400">
             {slide.number}
           </div>
@@ -598,7 +629,7 @@ function PptxCard({ inspect }: { inspect: InspectResult }) {
 
 function EmlCard({ inspect }: { inspect: InspectResult }) {
   return (
-    <div className="rounded-lg border border-border bg-bg-primary p-4 space-y-3">
+    <div className="space-y-3 rounded-[14px] bg-bg-primary/55 p-4">
       <div className="flex items-center gap-2">
         <Mail size={18} className="text-cyan-400" />
         <span className="text-sm font-medium text-text-primary">Email</span>
@@ -612,7 +643,7 @@ function EmlCard({ inspect }: { inspect: InspectResult }) {
       </div>
 
       {inspect.body_preview && (
-        <div className="rounded border border-border bg-bg-secondary p-2">
+        <div className="rounded-[12px] bg-white/62 p-2">
           <p className="text-xs text-text-primary whitespace-pre-wrap line-clamp-8">{inspect.body_preview}</p>
         </div>
       )}

@@ -10,8 +10,10 @@ import { usePanelStore } from "@/store/panel";
 import { showToast } from "@/components/ui/Toast";
 import type { SSEEvent } from "@/lib/types";
 
-/** Interval (ms) for polling runtime when status is queued/running */
-const WATCHDOG_INTERVAL = 5000;
+/** Interval (ms) for polling runtime when status is active */
+const WATCHDOG_INTERVAL = 2000;
+/** Only reconcile messages when the SSE stream appears genuinely stalled */
+const WATCHDOG_STALL_MS = 5000;
 
 /** Typing effect: interval between render ticks (ms) */
 const TYPING_TICK_MS = 25;
@@ -24,6 +26,7 @@ const TYPING_SPEED_THRESHOLD = 60;
 
 export function useSSE(sessionId: string | null) {
   const prevId = useRef<string | null>(null);
+  const lastEventAtRef = useRef<number>(0);
 
   // --- Typing effect buffer (ref-based, no re-render on append) ---
   const bufferRef = useRef("");
@@ -121,8 +124,10 @@ export function useSSE(sessionId: string | null) {
     // Same session — skip reconnect
     if (prevId.current === sessionId) return;
     prevId.current = sessionId;
+    lastEventAtRef.current = Date.now();
 
     const handleEvent = (event: SSEEvent) => {
+      lastEventAtRef.current = Date.now();
       switch (event.event) {
         case "text_delta":
           // Append to buffer (no re-render); typing loop will flush gradually
@@ -346,10 +351,20 @@ export function useSSE(sessionId: string | null) {
   const reconcileWithTruth = useCallback(async () => {
     if (!sessionId) return;
     const status = useChatStore.getState().status;
-    if (status !== "queued" && status !== "running") return;
+    if (
+      status !== "queued" &&
+      status !== "running" &&
+      status !== "waiting" &&
+      status !== "subtask_waiting"
+    ) {
+      return;
+    }
 
     const runtime = await fetchRuntime(sessionId);
     if (!runtime) return;
+    const stalled =
+      lastEventAtRef.current === 0 ||
+      Date.now() - lastEventAtRef.current > WATCHDOG_STALL_MS;
 
     // Backend has moved on but frontend is stuck — reconcile
     if (runtime.status === "idle" || runtime.status === "error") {
@@ -363,6 +378,20 @@ export function useSSE(sessionId: string | null) {
     } else if (runtime.status === "waiting") {
       const { fetchPendingPermissions } = useChatStore.getState();
       await fetchPendingPermissions(sessionId);
+      if (stalled) {
+        fetchMessages(sessionId);
+        fetchTaskPlan(sessionId);
+      }
+    } else if (
+      stalled &&
+      (runtime.status === "queued" ||
+        runtime.status === "running" ||
+        runtime.status === "subtask_waiting")
+    ) {
+      // During healthy streaming we intentionally avoid refetching persisted
+      // messages, otherwise the truth refresh visually overrides the live stream.
+      fetchMessages(sessionId);
+      fetchTaskPlan(sessionId);
     }
   }, [sessionId, fetchRuntime, clearBuffer, clearStreaming, clearPendingPermissions, fetchMessages, fetchSessions, fetchTree, fetchTaskPlan]);
 

@@ -16,17 +16,13 @@ import {
   Lock,
   Unlock,
   ExternalLink,
-  Loader2,
-  Download,
 } from "lucide-react";
-import { apiFetchRaw } from "@/lib/api";
 
 export default function KnowledgePage() {
   const {
     docs,
     isLoading,
     error,
-    searchQuery,
     selectedDocId,
     fetchDocs,
     setSearchQuery,
@@ -78,24 +74,24 @@ export default function KnowledgePage() {
   );
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full min-h-0 overflow-hidden">
       {/* Main list area */}
-      <div className="flex flex-1 flex-col overflow-hidden">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden px-6 py-4">
         {/* Search bar */}
-        <div className="border-b border-border px-4 py-3">
-          <div className="mx-auto flex max-w-2xl items-center gap-2 rounded-lg border border-border bg-bg-primary px-3 py-2">
-            <Search size={14} className="text-text-secondary" />
+        <div className="mx-auto flex w-full max-w-6xl items-center gap-3 pb-4">
+          <div className="flex min-w-0 flex-1 items-center gap-2 rounded-full bg-bg-primary/65 px-4 py-2.5 shadow-[0_12px_32px_rgba(42,41,51,0.04)]">
+            <Search size={15} className="text-text-secondary" />
             <input
               type="text"
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               placeholder="Search by title or tags..."
-              className="flex-1 bg-transparent text-sm text-text-primary outline-none placeholder:text-text-secondary/50"
+              className="min-w-0 flex-1 bg-transparent text-sm text-text-primary outline-none placeholder:text-text-secondary/45"
             />
             {searchInput && (
               <button
                 onClick={() => setSearchInput("")}
-                className="text-text-secondary hover:text-text-primary"
+                className="rounded-full px-2 text-sm text-text-secondary transition hover:bg-white/70 hover:text-text-primary"
               >
                 &times;
               </button>
@@ -104,8 +100,8 @@ export default function KnowledgePage() {
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto px-4 py-4">
-          <div className="mx-auto max-w-2xl">
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <div className="mx-auto h-full max-w-6xl overflow-y-auto px-1 pb-2">
             {isLoading && docs.length === 0 ? (
               <div className="flex items-center justify-center py-12">
                 <div className="h-5 w-5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
@@ -123,20 +119,22 @@ export default function KnowledgePage() {
                 </p>
               </div>
             ) : (
-              <div className="space-y-2">
-                <div className="mb-2 text-[10px] text-text-secondary">
+              <div className="space-y-3">
+                <div className="px-1 text-[10px] text-text-secondary">
                   {docs.length} document{docs.length !== 1 ? "s" : ""}
                 </div>
-                {docs.map((doc) => (
-                  <KnowledgeCard
-                    key={doc.doc_id}
-                    doc={doc}
-                    isSelected={doc.doc_id === selectedDocId}
-                    canDelete={isAdmin || doc.owner === user?.id}
-                    onSelect={() => handleSelect(doc)}
-                    onDelete={() => handleDelete(doc)}
-                  />
-                ))}
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  {docs.map((doc) => (
+                    <KnowledgeCard
+                      key={doc.doc_id}
+                      doc={doc}
+                      isSelected={doc.doc_id === selectedDocId}
+                      canDelete={isAdmin || doc.owner === user?.id}
+                      onSelect={() => handleSelect(doc)}
+                      onDelete={() => handleDelete(doc)}
+                    />
+                  ))}
+                </div>
               </div>
             )}
           </div>
@@ -164,44 +162,44 @@ function KnowledgeCard({
 }) {
   return (
     <div
-      className={`group rounded-lg border p-3 transition ${
-        isSelected
-          ? "border-accent/30 bg-accent/5"
-          : "border-border bg-bg-secondary hover:border-border/80"
-      }`}
+      role="button"
+      aria-pressed={isSelected}
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") onSelect();
+      }}
+      className="group flex h-[190px] cursor-pointer flex-col rounded-[24px] bg-white/72 p-4 shadow-[0_12px_28px_rgba(42,41,51,0.045)] transition duration-200 ease-out hover:-translate-y-0.5 hover:bg-white/90 hover:shadow-[0_18px_42px_rgba(42,41,51,0.09)]"
     >
-      <div className="flex items-start gap-3">
+      <div className="flex min-h-0 flex-1 items-start gap-3">
         {/* Icon */}
-        <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded bg-accent/10">
-          <FileText size={16} className="text-accent" />
+        <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-[16px] bg-accent/10">
+          <FileText size={17} className="text-accent" />
         </div>
 
         {/* Content */}
-        <div className="min-w-0 flex-1">
-          <button
-            onClick={onSelect}
-            className="text-left"
-          >
-            <div className="text-sm font-medium text-text-primary hover:text-accent transition">
-              {doc.title}
-            </div>
-          </button>
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="line-clamp-2 text-sm font-semibold leading-snug text-text-primary">
+            {doc.title}
+          </div>
 
           {doc.description && (
-            <p className="mt-0.5 text-xs text-text-secondary line-clamp-2">
+            <p className="mt-2 line-clamp-3 text-xs leading-relaxed text-text-secondary">
               {doc.description}
             </p>
           )}
 
-          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+          <div className="mt-auto flex flex-wrap items-center gap-2 pt-3">
             {/* Kind badge */}
-            <span className="rounded bg-bg-tertiary px-1.5 py-0.5 text-[10px] text-text-secondary">
+            <span className="rounded-full bg-bg-tertiary/80 px-2 py-0.5 text-[10px] text-text-secondary">
               {doc.kind}
             </span>
 
             {/* Permission */}
-            <span className={`flex items-center gap-0.5 text-[10px] ${
-              doc.permission === "public" ? "text-green-400" : "text-text-secondary/50"
+            <span className={`flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] ${
+              doc.permission === "public"
+                ? "bg-success/10 text-success"
+                : "bg-bg-tertiary/80 text-text-secondary"
             }`}>
               {doc.permission === "public" ? <Unlock size={9} /> : <Lock size={9} />}
               {doc.permission}
@@ -209,10 +207,10 @@ function KnowledgeCard({
 
             {/* Tags */}
             {doc.tags && doc.tags.length > 0 && (
-              <div className="flex items-center gap-1">
+              <div className="flex min-w-0 items-center gap-1">
                 <Tag size={9} className="text-text-secondary/40" />
                 {doc.tags.slice(0, 3).map((t, i) => (
-                  <span key={i} className="rounded bg-accent/10 px-1 py-0.5 text-[9px] text-accent">
+                  <span key={i} className="rounded-full bg-accent/10 px-1.5 py-0.5 text-[9px] text-accent">
                     {t}
                   </span>
                 ))}
@@ -224,7 +222,7 @@ function KnowledgeCard({
 
             {/* Date */}
             {doc.created_at && (
-              <span className="text-[10px] text-text-secondary/40">
+              <span className="rounded-full bg-bg-tertiary/80 px-2 py-0.5 text-[10px] text-text-secondary">
                 {new Date(doc.created_at).toLocaleDateString()}
               </span>
             )}
@@ -234,8 +232,11 @@ function KnowledgeCard({
         {/* Actions */}
         <div className="flex shrink-0 items-center gap-1">
           <button
-            onClick={onSelect}
-            className="rounded p-1 text-text-secondary transition hover:bg-accent/10 hover:text-accent"
+            onClick={(e) => {
+              e.stopPropagation();
+              onSelect();
+            }}
+            className="rounded-full p-1.5 text-text-secondary transition hover:bg-accent/10 hover:text-accent"
             title="Preview"
           >
             <ExternalLink size={13} />
@@ -246,7 +247,7 @@ function KnowledgeCard({
                 e.stopPropagation();
                 onDelete();
               }}
-              className="rounded p-1 text-text-secondary/40 opacity-0 transition hover:bg-danger/10 hover:text-danger group-hover:opacity-100"
+              className="rounded-full p-1.5 text-text-secondary/40 opacity-0 transition hover:bg-danger/10 hover:text-danger group-hover:opacity-100"
               title="Delete"
             >
               <Trash2 size={13} />

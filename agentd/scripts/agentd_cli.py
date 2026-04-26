@@ -183,7 +183,7 @@ def cmd_session_new(args):
     title = args.get("title", "New Session")
     resp = _post("/api/sessions", json={
         "title": title,
-        "agent_id": args.get("agent", "build"),
+        "agent_id": args.get("agent", "assistant"),
         "model_id": model_id,
     })
     if not resp:
@@ -552,7 +552,7 @@ def cmd_prompt_preview(_args):
     if not resp:
         return
     session = resp.get("data", {})
-    agent_id = session.get("agent_id", "build")
+    agent_id = session.get("agent_id", "assistant")
     model_id = session.get("model_id", "")
     user_root = (_state.get("user") or {}).get("workspace", "/tmp")
     session_dir = os.path.join(user_root, "sessions", sid)

@@ -740,6 +740,7 @@ export interface KnowledgeImportDraft {
   title: string;
   description: string;
   tags: string[];
+  permission?: "public" | "private";
   kind: string;
   filename: string;
   file_size: number;

@@ -18,11 +18,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
 class TestRolePromptSkillGuardrails(unittest.TestCase):
-    """Verify build.md contains skill execution priority guardrails."""
+    """Verify assistant.md contains skill execution priority guardrails."""
 
     @classmethod
     def setUpClass(cls):
-        role_path = Path(__file__).parent.parent / "agent" / "prompts" / "roles" / "build.md"
+        role_path = Path(__file__).parent.parent / "agent" / "prompts" / "roles" / "assistant.md"
         cls.role_text = role_path.read_text(encoding="utf-8")
 
     def test_has_skill_execution_priority_section(self):

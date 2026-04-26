@@ -19,7 +19,7 @@ class AgentState(TypedDict):
     session_id: str
     user_id: str
     workspace: str          # /workspaces/{user_id}/
-    agent_id: str           # "build" | "plan"
+    agent_id: str           # "assistant" | "plan" (legacy "build" aliases to "assistant")
     model_id: str
 
     # ── Message history (LangGraph managed, auto-append) ─────────────────

@@ -93,6 +93,15 @@ async def update_model_config(
     return mc
 
 
+async def delete_model_config(db: AsyncSession, config_id: uuid.UUID) -> bool:
+    mc = await db.get(ModelConfig, config_id)
+    if not mc:
+        return False
+    await db.delete(mc)
+    await db.flush()
+    return True
+
+
 # ── Enable / Disable / Set Default ─────────────────────────────────────────
 
 
@@ -127,6 +136,16 @@ async def set_default_model_config(db: AsyncSession, config_id: uuid.UUID) -> Op
 
     await _clear_default(db, model_type=mc.model_type)
     mc.is_default = True
+    mc.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+    return mc
+
+
+async def unset_default_model_config(db: AsyncSession, config_id: uuid.UUID) -> Optional[ModelConfig]:
+    mc = await db.get(ModelConfig, config_id)
+    if not mc:
+        return None
+    mc.is_default = False
     mc.updated_at = datetime.now(timezone.utc)
     await db.flush()
     return mc

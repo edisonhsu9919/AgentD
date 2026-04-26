@@ -7,9 +7,9 @@ import { Shield, ShieldOff, Zap } from "lucide-react";
 import type { PolicyMode } from "@/lib/types";
 
 const modes: { value: PolicyMode; label: string; icon: React.ElementType; desc: string }[] = [
-  { value: "manual", label: "Manual", icon: Shield, desc: "All tool calls require approval" },
-  { value: "autopilot", label: "Autopilot", icon: Zap, desc: "Saved rules auto-approve" },
-  { value: "fsd", label: "FSD", icon: ShieldOff, desc: "No HITL, sandbox enforced" },
+  { value: "manual", label: "manual", icon: Shield, desc: "所有工具调用都需要人工批准" },
+  { value: "autopilot", label: "autopilot", icon: Zap, desc: "已保存规则的调用会自动批准" },
+  { value: "fsd", label: "FSD", icon: ShieldOff, desc: "不走人工审批，依赖沙箱边界执行" },
 ];
 
 interface PolicySwitcherProps {
@@ -49,11 +49,10 @@ export default function PolicySwitcher({ sessionId }: PolicySwitcherProps) {
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-1.5 rounded border border-border px-2 py-1 text-xs text-text-secondary transition hover:bg-bg-secondary hover:text-text-primary"
+        className="flex h-11 w-11 items-center justify-center rounded-full text-text-secondary transition hover:bg-white hover:text-text-primary"
         title={currentDef.desc}
       >
-        <CurrentIcon size={12} />
-        {currentDef.label}
+        <CurrentIcon size={15} />
       </button>
 
       {open && (
@@ -62,9 +61,9 @@ export default function PolicySwitcher({ sessionId }: PolicySwitcherProps) {
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
 
           {/* Dropdown */}
-          <div className="absolute right-0 top-full z-50 mt-1 w-52 rounded border border-border bg-bg-secondary shadow-lg">
+          <div className="absolute bottom-[calc(100%+0.65rem)] left-0 z-50 w-60 rounded-[18px] border border-border bg-white/96 p-1.5 shadow-[0_18px_50px_rgba(42,41,51,0.12)] backdrop-blur">
             {error && (
-              <div className="border-b border-border px-3 py-1.5 text-xs text-danger">
+              <div className="mb-1 rounded-[14px] bg-danger/10 px-3 py-2 text-xs text-danger">
                 {error}
               </div>
             )}
@@ -76,14 +75,14 @@ export default function PolicySwitcher({ sessionId }: PolicySwitcherProps) {
                   key={m.value}
                   onClick={() => handleSwitch(m.value)}
                   disabled={updating}
-                  className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition hover:bg-bg-tertiary disabled:opacity-50 ${
-                    isActive ? "text-accent" : "text-text-secondary"
+                  className={`flex w-full items-center gap-3 rounded-[14px] px-3 py-2.5 text-left text-xs transition hover:bg-bg-primary disabled:opacity-50 ${
+                    isActive ? "bg-accent/8 text-accent" : "text-text-secondary"
                   }`}
                 >
-                  <Icon size={14} />
+                  <Icon size={13} />
                   <div>
-                    <div className="font-medium">{m.label}</div>
-                    <div className="text-[10px] text-text-secondary">{m.desc}</div>
+                    <div className="text-[13px] font-medium">{m.label}</div>
+                    <div className="mt-0.5 text-[10px] leading-4 text-text-secondary">{m.desc}</div>
                   </div>
                 </button>
               );

@@ -17,6 +17,14 @@
       "supports_detached": true,
       "owner_skill": "pdf-rename",
       "is_enabled": true
+    },
+    {
+      "name": "ocr-cli",
+      "entrypoint": "/absolute/path/to/services/ocr-cli/bin/ocr-cli",
+      "cwd_policy": "session_dir",
+      "env_kind": "isolated",
+      "supports_detached": true,
+      "is_enabled": true
     }
   ]
 }

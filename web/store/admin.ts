@@ -13,6 +13,7 @@ import type {
   Session,
   Message,
   SquareDetailResponse,
+  KnowledgeDocItem,
 } from "@/lib/types";
 
 interface AdminState {
@@ -33,6 +34,9 @@ interface AdminState {
   userDetail: UserProfile | null;
   userDetailLoading: boolean;
   fetchUserDetail: (userId: string) => Promise<void>;
+  userKnowledgeDocs: KnowledgeDocItem[];
+  userKnowledgeLoading: boolean;
+  fetchUserKnowledgeDocs: (userId: string) => Promise<void>;
 
   // --- User skills ---
   userSkills: UserSkillItem[];
@@ -141,6 +145,8 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   // --- User detail ---
   userDetail: null,
   userDetailLoading: false,
+  userKnowledgeDocs: [],
+  userKnowledgeLoading: false,
 
   fetchUserDetail: async (userId: string) => {
     set({ userDetailLoading: true });
@@ -149,6 +155,19 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       set({ userDetail: detail, userDetailLoading: false });
     } catch {
       set({ userDetail: null, userDetailLoading: false });
+    }
+  },
+
+  fetchUserKnowledgeDocs: async (userId: string) => {
+    set({ userKnowledgeLoading: true });
+    try {
+      const docs = await apiFetch<KnowledgeDocItem[]>("/knowledge/documents");
+      set({
+        userKnowledgeDocs: docs.filter((doc) => doc.owner === userId),
+        userKnowledgeLoading: false,
+      });
+    } catch {
+      set({ userKnowledgeDocs: [], userKnowledgeLoading: false });
     }
   },
 

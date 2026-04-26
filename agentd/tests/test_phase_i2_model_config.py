@@ -171,9 +171,11 @@ class TestServiceImport:
         assert callable(mc_svc.create_model_config)
         assert callable(mc_svc.get_model_config)
         assert callable(mc_svc.update_model_config)
+        assert callable(mc_svc.delete_model_config)
         assert callable(mc_svc.enable_model_config)
         assert callable(mc_svc.disable_model_config)
         assert callable(mc_svc.set_default_model_config)
+        assert callable(mc_svc.unset_default_model_config)
         assert callable(mc_svc.resolve_active_model_config)
 
 
@@ -191,10 +193,11 @@ class TestModelConfigRouter:
         from model_config.router import router
         paths = [route.path for route in router.routes]
         assert "" in paths  # list + create
-        assert "/{config_id}" in paths  # get + update
+        assert "/{config_id}" in paths  # get + update + delete
         assert "/{config_id}/enable" in paths
         assert "/{config_id}/disable" in paths
         assert "/{config_id}/set-default" in paths
+        assert "/{config_id}/unset-default" in paths
 
     def test_runtime_endpoint_registered(self):
         from model_config.router import runtime_router
@@ -233,7 +236,7 @@ class TestSessionCreateModelOptional:
 class TestMigration009:
     def test_expected_schema_version(self):
         from main import EXPECTED_SCHEMA_VERSION
-        assert EXPECTED_SCHEMA_VERSION == "014"
+        assert EXPECTED_SCHEMA_VERSION == "015"
 
     def test_migration_file_exists(self):
         from pathlib import Path

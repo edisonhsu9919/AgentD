@@ -1,11 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import type { Part, SubtaskResultPart, SourceRefsPart } from "@/lib/types";
+import type { Part, SubtaskResultPart } from "@/lib/types";
 import ToolCallBlock from "./ToolCallBlock";
 import KnowledgeSourceList from "./KnowledgeSourceList";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import MessageMarkdown from "./MessageMarkdown";
 import { ChevronRight, GitBranch, ExternalLink } from "lucide-react";
 
 /**
@@ -18,20 +17,28 @@ function stripThinkTags(content: string): string {
 
 interface MessagePartProps {
   part: Part;
+  role?: "user" | "assistant" | "tool";
   /** Map of tool_call_id → tool_name, built from sibling tool_call parts */
   toolNameMap?: Map<string, string>;
   /** Cross-message map of tool_call_id → {tool_name, input}, built from all messages */
   toolInfoMap?: Map<string, { tool_name: string; input: Record<string, unknown> }>;
 }
 
-export default function MessagePart({ part, toolNameMap, toolInfoMap }: MessagePartProps) {
+export default function MessagePart({ part, role = "assistant", toolNameMap, toolInfoMap }: MessagePartProps) {
   switch (part.type) {
     case "text": {
       const cleaned = stripThinkTags(part.content);
       if (!cleaned) return null;
+      if (role === "user") {
+        return (
+          <div className="chat-prose">
+            <MessageMarkdown>{cleaned}</MessageMarkdown>
+          </div>
+        );
+      }
       return (
-        <div className="prose prose-invert prose-sm max-w-none">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{cleaned}</ReactMarkdown>
+        <div className="chat-prose">
+          <MessageMarkdown>{cleaned}</MessageMarkdown>
         </div>
       );
     }
@@ -65,8 +72,8 @@ export default function MessagePart({ part, toolNameMap, toolInfoMap }: MessageP
 
     case "compaction":
       return (
-        <div className="my-1 rounded bg-bg-tertiary/50 px-3 py-2 text-xs text-text-secondary">
-          Context compacted — saved {part.tokens_saved} tokens
+        <div className="my-1 rounded-[16px] bg-bg-tertiary/50 px-3 py-2 text-[12px] text-text-secondary">
+          上下文已压缩，本轮回收 {part.tokens_saved} tokens
         </div>
       );
 
@@ -75,8 +82,8 @@ export default function MessagePart({ part, toolNameMap, toolInfoMap }: MessageP
 
     case "error":
       return (
-        <div className="my-1 rounded bg-danger/10 px-3 py-2 text-sm text-danger">
-          Error ({part.code}): {part.message}
+        <div className="my-1 rounded-[16px] bg-danger/10 px-3 py-2 text-[12px] text-danger">
+          错误（{part.code}）：{part.message}
         </div>
       );
 
@@ -96,15 +103,15 @@ function SubtaskResultCard({ part }: { part: SubtaskResultPart }) {
   const isFailed = part.status === "failed";
 
   return (
-    <div className={`my-2 rounded-lg border p-3 space-y-2 ${
+    <div className={`my-2 rounded-[16px] p-3 space-y-2 ${
       isFailed
-        ? "border-danger/20 bg-danger/5"
-        : "border-purple-500/20 bg-purple-500/5"
+        ? "bg-danger/5"
+        : "bg-purple-500/5"
     }`}>
       <div className="flex items-center gap-2">
         <GitBranch size={14} className={isFailed ? "text-danger" : "text-purple-400"} />
         <span className={`text-xs font-medium ${isFailed ? "text-danger" : "text-purple-400"}`}>
-          {isFailed ? "Sub-task Failed" : "Sub-task Completed"}
+          {isFailed ? "子任务失败" : "子任务完成"}
         </span>
         {part.title && (
           <span className="text-xs text-text-primary">&mdash; {part.title}</span>
@@ -112,7 +119,7 @@ function SubtaskResultCard({ part }: { part: SubtaskResultPart }) {
       </div>
 
       {part.summary && (
-        <p className="text-xs text-text-primary whitespace-pre-wrap">{part.summary}</p>
+        <p className="whitespace-pre-wrap text-[12px] text-text-primary">{part.summary}</p>
       )}
 
       {part.child_session_id && (
@@ -121,7 +128,7 @@ function SubtaskResultCard({ part }: { part: SubtaskResultPart }) {
           className="inline-flex items-center gap-1 text-[10px] text-accent transition hover:underline"
         >
           <ExternalLink size={10} />
-          View child session
+          查看子会话
         </a>
       )}
     </div>
@@ -143,10 +150,10 @@ function ReasoningBlock({ content }: { content: string }) {
           size={10}
           className={`transition-transform ${show ? "rotate-90" : ""}`}
         />
-        <span>Thought for a moment</span>
+        <span>查看思考过程</span>
       </button>
       {show && (
-        <div className="ml-1 mt-1 max-h-40 overflow-y-auto border-l border-border pl-3 text-xs leading-relaxed text-text-secondary/40 italic">
+        <div className="ml-1 mt-1 max-h-40 overflow-y-auto pl-3 text-[12px] leading-6 text-text-secondary/40 italic">
           {content}
         </div>
       )}

@@ -1,46 +1,25 @@
 "use client";
 
 import { useMemo } from "react";
-import type { Message, KnowledgeSearchResult, SourceRefItem } from "@/lib/types";
+import type { Message, KnowledgeSearchResult } from "@/lib/types";
 import MessagePart from "./MessagePart";
 import KnowledgeSourceList from "./KnowledgeSourceList";
 import CitedTextBlock from "./CitedTextBlock";
-import { User, Bot, Wrench } from "lucide-react";
-
-const roleConfig = {
-  user: {
-    icon: User,
-    label: "You",
-    align: "justify-end" as const,
-    bubble: "bg-accent/10 border-accent/20",
-  },
-  assistant: {
-    icon: Bot,
-    label: "Agent",
-    align: "justify-start" as const,
-    bubble: "bg-bg-secondary border-border",
-  },
-  tool: {
-    icon: Wrench,
-    label: "Tool",
-    align: "justify-start" as const,
-    bubble: "bg-bg-secondary border-border",
-  },
-};
+import CopyButton from "./CopyButton";
 
 export default function MessageBubble({
   message,
   toolInfoMap,
   knowledgeSources,
-  sessionId,
 }: {
   message: Message;
   toolInfoMap?: Map<string, { tool_name: string; input: Record<string, unknown> }>;
   knowledgeSources?: KnowledgeSearchResult[];
-  sessionId?: string;
 }) {
-  const config = roleConfig[message.role] || roleConfig.assistant;
-  const Icon = config.icon;
+  const isUser = message.role === "user";
+  const isTool = message.role === "tool";
+  const copyText = getVisibleMessageText(message);
+  const showMeta = copyText.length > 0 && !isTool;
 
   // Build tool_call_id → tool_name map so tool_result parts can resolve their tool name
   const toolNameMap = useMemo(() => {
@@ -54,30 +33,78 @@ export default function MessageBubble({
   }, [message.parts]);
 
   return (
-    <div className={`flex ${config.align} mb-4`}>
+    <article className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}>
       <div
-        className={`min-w-0 max-w-[85%] rounded-lg border px-4 py-3 ${config.bubble}`}
+        className={`min-w-0 ${isUser ? "max-w-[72%] rounded-[18px] bg-bg-primary/92 px-4 py-3 shadow-[0_12px_30px_rgba(42,41,51,0.04)]" : isTool ? "max-w-[min(100%,56rem)] pl-2" : "max-w-[min(100%,56rem)]"}`}
       >
-        {/* Header */}
-        <div className="mb-1 flex items-center gap-1.5">
-          <Icon size={12} className="text-text-secondary" />
-          <span className="text-xs font-medium text-text-secondary">
-            {config.label}
-          </span>
-        </div>
-
-        {/* Parts — with cited text merging */}
-        <div className="space-y-1">
-          <PartsRenderer
-            parts={message.parts}
-            toolNameMap={toolNameMap}
-            toolInfoMap={toolInfoMap}
-            knowledgeSources={knowledgeSources}
+        <PartsRenderer
+          messageRole={message.role}
+          parts={message.parts}
+          toolNameMap={toolNameMap}
+          toolInfoMap={toolInfoMap}
+          knowledgeSources={knowledgeSources}
+        />
+        {showMeta && (
+          <MessageMeta
+            createdAt={message.created_at}
+            copyText={copyText}
+            align={isUser ? "right" : "left"}
           />
-        </div>
+        )}
       </div>
+    </article>
+  );
+}
+
+function MessageMeta({
+  createdAt,
+  copyText,
+  align,
+}: {
+  createdAt: string;
+  copyText: string;
+  align: "left" | "right";
+}) {
+  return (
+    <div
+      className={`mt-2 flex items-center gap-2 text-[10px] text-text-secondary/38 ${
+        align === "right" ? "justify-end" : "justify-start"
+      }`}
+    >
+      <time dateTime={createdAt}>{formatMessageTime(createdAt)}</time>
+      <span className="h-1 w-1 rounded-full bg-text-secondary/20" />
+      <CopyButton
+        text={copyText}
+        label="复制"
+        title="复制本轮内容"
+        className="px-1.5 py-0.5 text-[10px]"
+      />
     </div>
   );
+}
+
+function formatMessageTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function getVisibleMessageText(message: Message) {
+  return message.parts
+    .filter((part) => part.type === "text")
+    .map((part) => (part.type === "text" ? stripThinkTags(part.content) : ""))
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+}
+
+function stripThinkTags(content: string): string {
+  return content.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 }
 
 /**
@@ -86,11 +113,13 @@ export default function MessageBubble({
  * Falls back to standard per-part rendering otherwise.
  */
 function PartsRenderer({
+  messageRole,
   parts,
   toolNameMap,
   toolInfoMap,
   knowledgeSources,
 }: {
+  messageRole: Message["role"];
   parts: Message["parts"];
   toolNameMap: Map<string, string>;
   toolInfoMap?: Map<string, { tool_name: string; input: Record<string, unknown> }>;
@@ -113,7 +142,15 @@ function PartsRenderer({
         {/* Render non-text/non-source_refs parts first (reasoning, tool_call, etc.) */}
         {parts.map((part, i) => {
           if (part.type === "text" || part.type === "source_refs") return null;
-          return <MessagePart key={i} part={part} toolNameMap={toolNameMap} toolInfoMap={toolInfoMap} />;
+          return (
+            <MessagePart
+              key={i}
+              part={part}
+              role={messageRole}
+              toolNameMap={toolNameMap}
+              toolInfoMap={toolInfoMap}
+            />
+          );
         })}
         {/* Then render the cited text block */}
         <CitedTextBlock text={combinedText} sources={sources} />
@@ -125,7 +162,13 @@ function PartsRenderer({
   return (
     <>
       {parts.map((part, i) => (
-        <MessagePart key={i} part={part} toolNameMap={toolNameMap} toolInfoMap={toolInfoMap} />
+        <MessagePart
+          key={i}
+          part={part}
+          role={messageRole}
+          toolNameMap={toolNameMap}
+          toolInfoMap={toolInfoMap}
+        />
       ))}
       {/* Fallback knowledge sources from tool results */}
       {knowledgeSources &&
