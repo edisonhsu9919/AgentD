@@ -74,8 +74,6 @@ async def run_microcompact(
 
     Returns MicrocompactResult with counts of what was done.
     """
-    from langchain_core.messages import RemoveMessage
-
     # 1. Get current checkpoint state
     snapshot = await agent.aget_state(config)
     if not snapshot:
@@ -84,6 +82,18 @@ async def run_microcompact(
     messages = snapshot.values.get("messages", [])
     if len(messages) < 5:
         return MicrocompactResult(applied=False, removed_count=0, replaced_count=0, reason="too_few_messages")
+    if not _checkpoint_tool_adjacency_is_valid(messages):
+        logger.warning(
+            "Microcompact skipped invalid checkpoint: session=%s bad=%s",
+            session_id[:8] if session_id else "?",
+            _find_invalid_tool_adjacency_indices(messages),
+        )
+        return MicrocompactResult(
+            applied=False,
+            removed_count=0,
+            replaced_count=0,
+            reason="invalid_checkpoint",
+        )
 
     # 2. Identify candidates and protected messages
     candidates = _find_compressible_candidates(messages)
@@ -149,11 +159,11 @@ async def run_microcompact(
             ),
         )
 
-    # 4. Execute three-action classification
-    remove_ids = []          # Action 1: remove entirely
-    replace_messages = []    # Action 2: replace with preview+ref
-    capsule_messages = []    # Action 3: compress to capsule
-    remove_count = 0
+    # 4. Build a replacement-only checkpoint.
+    # OpenAI-compatible providers require every assistant tool_call to be
+    # followed by its ToolMessage. Therefore microcompact must preserve the
+    # tool result envelope and only shrink ToolMessage content in place.
+    replacements_by_index: dict[int, ToolMessage] = {}
     replace_count = 0
     capsule_count = 0
 
@@ -163,75 +173,210 @@ async def run_microcompact(
         tool_name = candidate["tool_name"]
         chars = candidate["chars"]
 
-        if not hasattr(msg, "id") or not msg.id:
-            continue
-
         content = msg.content if isinstance(msg.content, str) else str(msg.content)
 
         is_high_compress = candidate.get("is_high_compress", False)
         is_preview = candidate.get("is_preview", False)
 
         if chars > SINGLE_MSG_SIZE_THRESHOLD or is_preview:
-            # Action 2: Large result or P4-A preview → replace with preview + ref
-            preview = content[:PREVIEW_CHARS]
-            replacement = ToolMessage(
-                content=(
-                    f"{preview}\n\n"
-                    f"--- [Microcompact: result truncated from {chars:,} chars. "
-                    f"Full output in artifact if saved by P4-A.] ---"
-                ),
-                name=tool_name,
-                tool_call_id=getattr(msg, "tool_call_id", ""),
-                id=msg.id,
+            replacement = _build_compacted_tool_message(
+                msg,
+                tool_name=tool_name,
+                original_content=content,
+                original_chars=chars,
+                preview_chars=PREVIEW_CHARS,
             )
-            remove_ids.append(msg.id)
-            replace_messages.append(replacement)
+            replacements_by_index[idx] = replacement
             replace_count += 1
-        elif is_high_compress and chars > 100:
-            # Action 3: Medium/short high-compress tool result → capsule
-            capsule_text = f"[{tool_name} result: {chars:,} chars, removed by microcompact]"
-            capsule = ToolMessage(
-                content=capsule_text,
-                name=tool_name,
-                tool_call_id=getattr(msg, "tool_call_id", ""),
-                id=msg.id,
+        elif is_high_compress or chars > 100:
+            capsule = _build_compacted_tool_message(
+                msg,
+                tool_name=tool_name,
+                original_content=content,
+                original_chars=chars,
+                preview_chars=0,
             )
-            remove_ids.append(msg.id)
-            capsule_messages.append(capsule)
+            if _content_len(capsule.content) >= chars:
+                continue
+            replacements_by_index[idx] = capsule
             capsule_count += 1
-        else:
-            # Action 1: Small old result → remove entirely
-            remove_ids.append(msg.id)
-            remove_count += 1
 
-    if not remove_ids:
-        return MicrocompactResult(applied=False, removed_count=0, replaced_count=0, reason="no_removable_ids")
-
-    # 5. Apply via checkpoint update: remove old + add replacements/capsules
-    try:
-        update_messages = [RemoveMessage(id=rid) for rid in remove_ids]
-        # Add back preview+ref replacements and capsules
-        update_messages.extend(replace_messages)
-        update_messages.extend(capsule_messages)
-        await agent.aupdate_state(
-            config=config,
-            values={"messages": update_messages},
+    if not replacements_by_index:
+        return MicrocompactResult(
+            applied=False,
+            removed_count=0,
+            replaced_count=0,
+            reason="no_effective_replacements",
         )
+
+    rebuilt_messages = [
+        replacements_by_index.get(idx, msg)
+        for idx, msg in enumerate(messages)
+    ]
+    if not _checkpoint_tool_adjacency_is_valid(rebuilt_messages):
+        logger.warning(
+            "Microcompact aborted invalid rebuild: session=%s bad=%s",
+            session_id[:8] if session_id else "?",
+            _find_invalid_tool_adjacency_indices(rebuilt_messages),
+        )
+        return MicrocompactResult(
+            applied=False,
+            removed_count=0,
+            replaced_count=0,
+            reason="invalid_rebuild",
+        )
+
+    # 5. Apply via full checkpoint rewrite. Avoid RemoveMessage(id=tool_id)
+    # followed by a same-id ToolMessage because LangGraph remove semantics can
+    # swallow the replacement and leave dangling assistant tool_calls.
+    try:
+        from langchain_core.messages import RemoveMessage
+        from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+        new_config = await _aupdate_microcompact_checkpoint(
+            agent,
+            config,
+            [
+                RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                *rebuilt_messages,
+            ],
+        )
+        _merge_updated_config(config, new_config)
     except Exception as e:
         logger.warning("Microcompact checkpoint update failed: %s", e)
         return MicrocompactResult(applied=False, removed_count=0, replaced_count=0, reason=f"error: {e}")
 
+    try:
+        updated_snapshot = await agent.aget_state(config)
+        updated_messages = (
+            updated_snapshot.values.get("messages", [])
+            if updated_snapshot else []
+        )
+        if not _checkpoint_tool_adjacency_is_valid(updated_messages):
+            logger.warning(
+                "Microcompact produced invalid checkpoint: session=%s bad=%s",
+                session_id[:8] if session_id else "?",
+                _find_invalid_tool_adjacency_indices(updated_messages),
+            )
+            return MicrocompactResult(
+                applied=False,
+                removed_count=0,
+                replaced_count=0,
+                reason="invalid_after_update",
+            )
+    except Exception as e:
+        logger.warning("Microcompact checkpoint verification failed: %s", e)
+        return MicrocompactResult(applied=False, removed_count=0, replaced_count=0, reason=f"verify_error: {e}")
+
     logger.info(
         "Microcompact session=%s: removed=%d replaced=%d capsules=%d reason=%s",
-        session_id[:8] if session_id else "?", remove_count, replace_count, capsule_count, reason,
+        session_id[:8] if session_id else "?", 0, replace_count, capsule_count, reason,
     )
 
     return MicrocompactResult(
         applied=True,
-        removed_count=remove_count,
+        removed_count=0,
         replaced_count=replace_count + capsule_count,
         reason=reason,
     )
+
+
+def _content_len(content: Any) -> int:
+    return len(content if isinstance(content, str) else str(content))
+
+
+def _build_compacted_tool_message(
+    msg: ToolMessage,
+    tool_name: str,
+    original_content: str,
+    original_chars: int,
+    preview_chars: int,
+) -> ToolMessage:
+    tool_name = tool_name or getattr(msg, "name", "") or "unknown"
+    tool_call_id = getattr(msg, "tool_call_id", "") or ""
+    content = _build_compacted_tool_content(
+        tool_name=tool_name,
+        original_content=original_content,
+        original_chars=original_chars,
+        preview_chars=preview_chars,
+    )
+    kwargs = {
+        "content": content,
+        "name": tool_name,
+        "tool_call_id": tool_call_id,
+        "id": getattr(msg, "id", None),
+    }
+    status = getattr(msg, "status", None)
+    if status:
+        kwargs["status"] = status
+    artifact = getattr(msg, "artifact", None)
+    if artifact is not None:
+        kwargs["artifact"] = artifact
+    return ToolMessage(**kwargs)
+
+
+def _build_compacted_tool_content(
+    tool_name: str,
+    original_content: str,
+    original_chars: int,
+    preview_chars: int,
+) -> str:
+    lines = [
+        "[Tool result compacted by AgentD microcompact.",
+        f"Tool: {tool_name}",
+        f"Original size: {original_chars:,} chars",
+    ]
+    if preview_chars > 0:
+        preview = original_content[:preview_chars]
+        lines.extend([
+            "Preview:",
+            preview,
+            "Full output omitted to save context.]",
+        ])
+    else:
+        lines.append("Full output omitted to save context.]")
+    return "\n".join(lines)
+
+
+def _merge_updated_config(config: dict, new_config: Any) -> None:
+    if not isinstance(new_config, dict):
+        return
+    existing_configurable = dict(config.get("configurable") or {})
+    returned_configurable = dict(new_config.get("configurable") or {})
+    thread_id = (
+        returned_configurable.get("thread_id")
+        or existing_configurable.get("thread_id")
+    )
+    checkpoint_ns = (
+        returned_configurable.get("checkpoint_ns")
+        or existing_configurable.get("checkpoint_ns")
+    )
+    if not thread_id and not checkpoint_ns:
+        return
+    config.clear()
+    config["configurable"] = {}
+    if thread_id:
+        config["configurable"]["thread_id"] = thread_id
+    if checkpoint_ns:
+        config["configurable"]["checkpoint_ns"] = checkpoint_ns
+
+
+async def _aupdate_microcompact_checkpoint(agent, config: dict, messages: list):
+    """Rewrite checkpoint messages from an explicit maintenance boundary.
+
+    Real LangGraph graphs cannot always infer the node that owns a full
+    checkpoint rewrite, so microcompact must pass as_node. Test doubles and
+    older adapters may not accept that keyword, hence the TypeError fallback.
+    """
+    values = {"messages": messages}
+    try:
+        return await agent.aupdate_state(
+            config=config,
+            values=values,
+            as_node="__start__",
+        )
+    except TypeError:
+        return await agent.aupdate_state(config=config, values=values)
 
 
 def _find_compressible_candidates(messages: list) -> list[dict]:
@@ -358,3 +503,44 @@ def _find_protected_indices(messages: list) -> set[int]:
     protected.update(_latest_state_tool.values())
 
     return protected
+
+
+def _checkpoint_tool_adjacency_is_valid(messages: list) -> bool:
+    return not _find_invalid_tool_adjacency_indices(messages)
+
+
+def _find_invalid_tool_adjacency_indices(messages: list) -> list[int]:
+    invalid: set[int] = set()
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            required_ids = [
+                tc.get("id")
+                for tc in getattr(msg, "tool_calls", []) or []
+                if tc.get("id")
+            ]
+            j = i + 1
+            tool_indices: list[int] = []
+            tool_ids: list[str | None] = []
+            while j < len(messages) and isinstance(messages[j], ToolMessage):
+                tool_indices.append(j)
+                tool_ids.append(getattr(messages[j], "tool_call_id", None))
+                j += 1
+
+            if (
+                len(tool_ids) < len(required_ids)
+                or any(tool_call_id not in tool_ids for tool_call_id in required_ids)
+                or any(tool_call_id not in required_ids for tool_call_id in tool_ids)
+            ):
+                invalid.add(i)
+                invalid.update(tool_indices)
+            i = max(j, i + 1)
+            continue
+
+        if isinstance(msg, ToolMessage):
+            invalid.add(i)
+
+        i += 1
+
+    return sorted(invalid)

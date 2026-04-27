@@ -30,6 +30,76 @@ async def create_permission_request(
     return pr
 
 
+async def get_permission_request_by_tool_call(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    tool_call_id: str,
+    statuses: list[str] | None = None,
+) -> Optional[PermissionRequest]:
+    """Return the newest permission request for a session/tool_call_id."""
+    if not tool_call_id:
+        return None
+
+    stmt = (
+        select(PermissionRequest)
+        .where(
+            PermissionRequest.session_id == session_id,
+            PermissionRequest.tool_call_id == tool_call_id,
+        )
+        .order_by(PermissionRequest.created_at.desc())
+        .limit(1)
+    )
+    if statuses:
+        stmt = stmt.where(PermissionRequest.status.in_(statuses))
+
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def get_or_create_permission_request(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    tool_call_id: str,
+    tool_name: str,
+    tool_input: dict,
+    permission_id: uuid.UUID | None = None,
+    reusable_statuses: list[str] | None = None,
+) -> tuple[PermissionRequest, bool]:
+    """Create a permission request unless this tool_call_id already has one.
+
+    HITL resume can observe the same checkpoint interrupt more than once. The
+    permission audit row is keyed by the provider's tool_call_id, so repeated
+    handling of the same interrupt must reuse the existing row instead of
+    manufacturing another pending/auto-approved request.
+    """
+    reusable_statuses = reusable_statuses or [
+        "pending",
+        "approved",
+        "denied",
+        "resumed",
+        "auto_approved",
+    ]
+    existing = await get_permission_request_by_tool_call(
+        db,
+        session_id,
+        tool_call_id,
+        statuses=reusable_statuses,
+    )
+    if existing is not None:
+        return existing, False
+    return (
+        await create_permission_request(
+            db,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            permission_id=permission_id,
+        ),
+        True,
+    )
+
+
 async def get_permission_request(
     db: AsyncSession, permission_id: uuid.UUID
 ) -> Optional[PermissionRequest]:
@@ -141,5 +211,26 @@ async def mark_resolved_as_resumed(
             PermissionRequest.status.in_(["approved", "denied"]),
         )
         .values(status="resumed")
+    )
+    return result.rowcount
+
+
+async def mark_permission_requests_auto_approved(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    tool_call_ids: list[str],
+) -> int:
+    """Mark only the current interrupt's pending requests as auto-approved."""
+    ids = [tool_call_id for tool_call_id in tool_call_ids if tool_call_id]
+    if not ids:
+        return 0
+    result = await db.execute(
+        update(PermissionRequest)
+        .where(
+            PermissionRequest.session_id == session_id,
+            PermissionRequest.tool_call_id.in_(ids),
+            PermissionRequest.status == "pending",
+        )
+        .values(status="auto_approved", resolved_at=datetime.now(timezone.utc))
     )
     return result.rowcount

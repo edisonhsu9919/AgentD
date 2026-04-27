@@ -1,4 +1,5 @@
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -6,6 +7,27 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from session.models import Message, Session
+
+BUSY_DELETE_STATUSES = {"queued", "running", "waiting", "subtask_waiting"}
+
+
+@dataclass(frozen=True)
+class DeleteSessionTreeResult:
+    deleted_session_ids: list[uuid.UUID]
+
+    @property
+    def deleted_count(self) -> int:
+        return len(self.deleted_session_ids)
+
+
+class SessionTreeBusyError(Exception):
+    def __init__(self, blocking_session_ids: list[uuid.UUID]):
+        self.blocking_session_ids = blocking_session_ids
+        super().__init__("Session or child sessions are still running")
+
+
+class SessionTreeOwnershipError(Exception):
+    pass
 
 
 def normalize_agent_id(agent_id: str | None) -> str:
@@ -83,9 +105,80 @@ async def get_session(
 
 
 async def delete_session(db: AsyncSession, session_id: uuid.UUID) -> bool:
-    """Delete a session and all its messages (CASCADE). Returns True if found."""
+    """Delete one session row.
+
+    Prefer ``delete_session_tree`` for API paths so child sessions are handled
+    intentionally. This low-level helper remains for backward compatibility.
+    """
+    return await _delete_session_row(db, session_id) > 0
+
+
+async def _delete_session_row(db: AsyncSession, session_id: uuid.UUID) -> int:
     result = await db.execute(delete(Session).where(Session.id == session_id))
-    return result.rowcount > 0
+    return result.rowcount or 0
+
+
+async def collect_session_tree(
+    db: AsyncSession,
+    root_session_id: uuid.UUID,
+) -> list[Session]:
+    """Return root + descendants in parent-before-child order."""
+    root = await get_session(db, root_session_id)
+    if not root:
+        return []
+
+    tree: list[Session] = [root]
+    seen = {root.id}
+    frontier = [root.id]
+
+    while frontier:
+        rows = (
+            await db.execute(select(Session).where(Session.parent_id.in_(frontier)))
+        ).scalars().all()
+        next_frontier: list[uuid.UUID] = []
+        for session in rows:
+            if session.id in seen:
+                continue
+            seen.add(session.id)
+            tree.append(session)
+            next_frontier.append(session.id)
+        frontier = next_frontier
+
+    return tree
+
+
+async def delete_session_tree(
+    db: AsyncSession,
+    root_session_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> DeleteSessionTreeResult:
+    """Delete a session and all descendant child sessions.
+
+    The delete order is leaf-to-root so the self-referential parent_id FK does
+    not block deletion. Associated rows with session_id FKs are handled by DB
+    cascades.
+    """
+    tree = await collect_session_tree(db, root_session_id)
+    if not tree:
+        return DeleteSessionTreeResult(deleted_session_ids=[])
+
+    if any(session.user_id != user_id for session in tree):
+        raise SessionTreeOwnershipError(
+            "Session tree contains sessions owned by another user"
+        )
+
+    blocking = [
+        session.id for session in tree
+        if session.status in BUSY_DELETE_STATUSES
+    ]
+    if blocking:
+        raise SessionTreeBusyError(blocking)
+
+    deleted_ids = [session.id for session in tree]
+    for session in reversed(tree):
+        await _delete_session_row(db, session.id)
+
+    return DeleteSessionTreeResult(deleted_session_ids=deleted_ids)
 
 
 async def update_session_status(

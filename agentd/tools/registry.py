@@ -144,25 +144,82 @@ def reset_turn_accumulator(session_id: str) -> None:
 
 # Max identical (tool_name + args) calls allowed per run
 _TOOL_DEDUP_MAX = 3
+_MAX_IDENTICAL_TOOL_CALLS_HARD = 6
+_MAX_TOOL_CALLS_PER_RUN = 64
+_MAX_BLOCKED_TOOL_CALLS_PER_RUN = 12
 
 # Per-session signature counters: {session_id: {signature: count}}
 _tool_call_counters: dict[str, dict[str, int]] = {}
+_tool_loop_guard_state: dict[str, dict[str, Any]] = {}
+
+
+class ToolLoopCircuitBreaker(RuntimeError):
+    """Raised when the runtime hard-stops a repeated blocked tool loop."""
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        tool_name: str,
+        canonical_args: dict[str, Any],
+        blocked_count: int,
+        identical_call_count: int,
+        reason: str,
+        message: str,
+    ) -> None:
+        super().__init__(message)
+        self.session_id = session_id
+        self.tool_name = tool_name
+        self.canonical_args = canonical_args
+        self.blocked_count = blocked_count
+        self.identical_call_count = identical_call_count
+        self.reason = reason
+        self.message = message
+
+
+def _new_guard_state() -> dict[str, Any]:
+    return {
+        "total_calls": 0,
+        "blocked_calls": 0,
+        "last_trigger": None,
+    }
 
 
 def reset_tool_call_counter(session_id: str) -> None:
     """Reset per-run tool call counters. Call at the start of each run."""
     _tool_call_counters[session_id] = {}
+    _tool_loop_guard_state[session_id] = _new_guard_state()
 
 
-def _make_tool_signature(tool_name: str, kwargs: dict) -> str:
+def get_tool_loop_guard_diagnostics(session_id: str) -> dict[str, Any]:
+    """Return current tool-loop diagnostics for the active run."""
+    state = _tool_loop_guard_state.get(session_id, _new_guard_state())
+    last_trigger = state.get("last_trigger") or {}
+    return {
+        "tool_loop_total_calls": state.get("total_calls", 0),
+        "tool_loop_blocked_calls": state.get("blocked_calls", 0),
+        "tool_loop_guard_triggered": bool(last_trigger),
+        "tool_loop_guard_reason": last_trigger.get("reason", ""),
+        "tool_loop_guard_tool_name": last_trigger.get("tool_name", ""),
+        "tool_loop_guard_canonical_args": last_trigger.get("canonical_args"),
+        "tool_loop_guard_blocked_count": last_trigger.get("blocked_count", 0),
+        "tool_loop_guard_identical_call_count": last_trigger.get("identical_call_count", 0),
+        "tool_loop_guard_message": last_trigger.get("message", ""),
+    }
+
+
+def _make_tool_signature(tool: BaseTool, kwargs: dict) -> tuple[str, dict[str, Any]]:
     """Create a normalized signature for dedup comparison."""
     import json as _json
-    # Sort keys for stable comparison, ignore None values
-    cleaned = {k: v for k, v in sorted(kwargs.items()) if v is not None}
-    return f"{tool_name}|{_json.dumps(cleaned, sort_keys=True, ensure_ascii=False)}"
+    canonical = tool.canonicalize_args(kwargs)
+    cleaned = {k: v for k, v in sorted(canonical.items()) if v is not None}
+    return (
+        f"{tool.name}|{_json.dumps(cleaned, sort_keys=True, ensure_ascii=False)}",
+        cleaned,
+    )
 
 
-def _check_tool_dedup(session_id: str, tool_name: str, kwargs: dict) -> str | None:
+def _check_tool_dedup(session_id: str, tool: BaseTool, kwargs: dict) -> str | None:
     """Check if this tool call has been made too many times with identical args.
 
     Returns None if OK to proceed, or a warning message if limit reached.
@@ -170,16 +227,41 @@ def _check_tool_dedup(session_id: str, tool_name: str, kwargs: dict) -> str | No
     After the limit, returns progressively shorter messages to minimize
     token waste from repeated blocked calls.
     """
-    sig = _make_tool_signature(tool_name, kwargs)
-    counters = _tool_call_counters.get(session_id, {})
+    counters = _tool_call_counters.setdefault(session_id, {})
+    state = _tool_loop_guard_state.setdefault(session_id, _new_guard_state())
+    state["total_calls"] += 1
+    sig, canonical_args = _make_tool_signature(tool, kwargs)
     count = counters.get(sig, 0)
+
+    if state["total_calls"] > _MAX_TOOL_CALLS_PER_RUN:
+        raise _build_tool_loop_breaker(
+            session_id=session_id,
+            tool_name=tool.name,
+            canonical_args=canonical_args,
+            blocked_count=state["blocked_calls"],
+            identical_call_count=count + 1,
+            reason="tool_call_budget_exceeded",
+        )
+
+    if count >= _MAX_IDENTICAL_TOOL_CALLS_HARD:
+        counters[sig] = count + 1
+        _tool_call_counters[session_id] = counters
+        state["blocked_calls"] += 1
+        raise _build_tool_loop_breaker(
+            session_id=session_id,
+            tool_name=tool.name,
+            canonical_args=canonical_args,
+            blocked_count=(count - _TOOL_DEDUP_MAX + 1),
+            identical_call_count=count + 1,
+            reason="identical_tool_call_loop",
+        )
 
     if count >= _TOOL_DEDUP_MAX:
         excess = count - _TOOL_DEDUP_MAX
         # First blocked call: full explanation
         if excess == 0:
             msg = (
-                f"BLOCKED: {tool_name} called {_TOOL_DEDUP_MAX} times with identical parameters. "
+                f"BLOCKED: {tool.name} called {_TOOL_DEDUP_MAX} times with identical parameters. "
                 f"This exact call is now disabled for this run. "
                 f"You MUST either: use different parameters, use a different tool, "
                 f"or stop and summarize your findings."
@@ -192,11 +274,59 @@ def _check_tool_dedup(session_id: str, tool_name: str, kwargs: dict) -> str | No
         # Still increment so we can track how many times model ignored the block
         counters[sig] = count + 1
         _tool_call_counters[session_id] = counters
+        state["blocked_calls"] += 1
+        if state["blocked_calls"] >= _MAX_BLOCKED_TOOL_CALLS_PER_RUN:
+            raise _build_tool_loop_breaker(
+                session_id=session_id,
+                tool_name=tool.name,
+                canonical_args=canonical_args,
+                blocked_count=state["blocked_calls"],
+                identical_call_count=count + 1,
+                reason="blocked_tool_call_budget_exceeded",
+            )
         return msg
 
     counters[sig] = count + 1
     _tool_call_counters[session_id] = counters
     return None
+
+
+def _build_tool_loop_breaker(
+    *,
+    session_id: str,
+    tool_name: str,
+    canonical_args: dict[str, Any],
+    blocked_count: int,
+    identical_call_count: int,
+    reason: str,
+) -> ToolLoopCircuitBreaker:
+    message = (
+        "Tool loop circuit breaker triggered: the model kept repeating an already-blocked "
+        f"{tool_name} call with the same canonical parameters. "
+        "Stop calling this tool with the same arguments and summarize from the existing "
+        "results or wait for further user input."
+    )
+    breaker = ToolLoopCircuitBreaker(
+        session_id=session_id,
+        tool_name=tool_name,
+        canonical_args=canonical_args,
+        blocked_count=blocked_count,
+        identical_call_count=identical_call_count,
+        reason=reason,
+        message=message,
+    )
+    _tool_loop_guard_state[session_id] = {
+        **_tool_loop_guard_state.get(session_id, _new_guard_state()),
+        "last_trigger": {
+            "reason": reason,
+            "tool_name": tool_name,
+            "canonical_args": canonical_args,
+            "blocked_count": blocked_count,
+            "identical_call_count": identical_call_count,
+            "message": message,
+        },
+    }
+    return breaker
 
 
 def _make_coroutine(tool: BaseTool, ctx: ToolContext):
@@ -223,7 +353,7 @@ def _make_coroutine(tool: BaseTool, ctx: ToolContext):
             raise ToolException(route_block)
 
         # Per-run dedup guard — prevent identical tool call loops
-        dedup_warning = _check_tool_dedup(ctx.session_id, tool.name, kwargs)
+        dedup_warning = _check_tool_dedup(ctx.session_id, tool, kwargs)
         if dedup_warning:
             # Raise as ToolException so model sees it as an error, not a success
             raise ToolException(dedup_warning)

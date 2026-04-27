@@ -574,10 +574,15 @@ async def build_agent(
     # 1. Model — resolve base_url/api_key from DB config or env fallback (Phase I2)
     # trust_env=False: prevent httpx from inheriting HTTP_PROXY / HTTPS_PROXY (#29).
     from core.database import AsyncSessionLocal
-    from model_config.service import resolve_active_model_config
+    from agent.provider_reasoning import (
+        ProviderAwareChatOpenAI,
+        build_chatopenai_reasoning_kwargs,
+        resolve_provider_family,
+    )
+    from model_config.service import resolve_model_config_for_model_id
 
     async with AsyncSessionLocal() as db:
-        resolved = await resolve_active_model_config(db)
+        resolved = await resolve_model_config_for_model_id(db, model_id)
 
     # Phase P3: respect model capability profile — disable streaming
     # when the model (or its inference server) doesn't reliably support it.
@@ -585,14 +590,20 @@ async def build_agent(
     # capabilities.streaming=false in model_configs.
     caps = resolved.capabilities or {}
     use_streaming = caps.get("streaming", True)
+    provider_kwargs = build_chatopenai_reasoning_kwargs(resolved)
+    provider_family = resolve_provider_family(
+        resolved.provider_type, resolved.base_url, resolved.model_id,
+    )
 
-    llm = ChatOpenAI(
-        model=model_id,
+    llm = ProviderAwareChatOpenAI(
+        model=resolved.model_id,
         base_url=resolved.base_url,
         api_key=resolved.api_key,
         streaming=use_streaming,
         stream_usage=use_streaming,
         http_async_client=httpx.AsyncClient(trust_env=False),
+        provider_family=provider_family,
+        **provider_kwargs,
     )
 
     # 2. Tools (bound to session context)
@@ -659,5 +670,7 @@ async def build_agent(
     agent._workspace_dir = effective_workspace
     agent._model_id = model_id
     agent._run_id = run_id or ""
+    agent._provider_type = resolved.provider_type
+    agent._provider_family = provider_family
 
     return agent

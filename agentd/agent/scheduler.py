@@ -57,6 +57,23 @@ async def enqueue_resume(
     return run
 
 
+async def enqueue_continue(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    payload: dict | None = None,
+) -> AgentRun:
+    """Enqueue a checkpoint continuation without appending a user message."""
+    run = AgentRun(
+        session_id=session_id,
+        run_type="continue",
+        status="queued",
+        payload=payload or {"mode": "retry_model_node"},
+    )
+    db.add(run)
+    await db.flush()
+    return run
+
+
 async def enqueue_abort(
     db: AsyncSession,
     session_id: uuid.UUID,
@@ -380,4 +397,3 @@ async def is_interrupted(db: AsyncSession, session_id: uuid.UUID) -> bool:
 
     # Fallback: legacy queued abort run (backward compat)
     return await has_pending_abort(db, session_id)
-

@@ -260,6 +260,7 @@ class ResolvedModelConfig:
     base_url: str
     api_key: str
     model_id: str
+    provider_type: str = "openai_compatible"
     config_id: uuid.UUID | None = None
     capabilities: dict | None = None
     timeout_seconds: int | None = None
@@ -298,6 +299,7 @@ async def resolve_active_model_config(db: AsyncSession) -> ResolvedModelConfig:
         return ResolvedModelConfig(
             source="db_default",
             name=mc.name,
+            provider_type=mc.provider_type,
             base_url=mc.base_url,
             api_key=mc.api_key,
             model_id=mc.model_id,
@@ -316,11 +318,75 @@ async def resolve_active_model_config(db: AsyncSession) -> ResolvedModelConfig:
     return ResolvedModelConfig(
         source="env_fallback",
         name="Environment Default",
+        provider_type="openai_compatible",
         base_url=settings.local_llm_url,
         api_key=settings.llm_api_key,
         model_id=settings.default_model_id,
         context_window=discovered_cw or manual_cw,
     )
+
+
+async def resolve_model_config_for_model_id(
+    db: AsyncSession,
+    model_id: str,
+) -> ResolvedModelConfig:
+    """Resolve the enabled config that owns a session's model_id.
+
+    A session stores the provider-facing model_id. Runtime must use the same
+    config row's base_url/api_key/provider settings instead of mixing this
+    model_id with whichever provider is currently default.
+    """
+    requested = (model_id or "").strip()
+    if not requested:
+        return await resolve_active_model_config(db)
+
+    result = await db.execute(
+        select(ModelConfig)
+        .where(
+            ModelConfig.model_type == "llm",
+            ModelConfig.model_id == requested,
+            ModelConfig.is_enabled == True,  # noqa: E712
+        )
+        .order_by(ModelConfig.is_default.desc(), ModelConfig.updated_at.desc())
+        .limit(1)
+    )
+    mc = result.scalar_one_or_none()
+
+    if mc:
+        manual_cw = mc.context_window or settings.context_window_tokens
+        discovered_cw = await discover_provider_context_window(
+            mc.base_url, mc.model_id, mc.api_key,
+        )
+        return ResolvedModelConfig(
+            source="db_model_id",
+            name=mc.name,
+            provider_type=mc.provider_type,
+            base_url=mc.base_url,
+            api_key=mc.api_key,
+            model_id=mc.model_id,
+            config_id=mc.id,
+            capabilities=mc.capabilities,
+            timeout_seconds=mc.timeout_seconds,
+            extra_params=mc.extra_params,
+            context_window=discovered_cw or manual_cw,
+        )
+
+    if requested == settings.default_model_id:
+        manual_cw = settings.context_window_tokens
+        discovered_cw = await discover_provider_context_window(
+            settings.local_llm_url, settings.default_model_id, settings.llm_api_key,
+        )
+        return ResolvedModelConfig(
+            source="env_model_id",
+            name="Environment Default",
+            provider_type="openai_compatible",
+            base_url=settings.local_llm_url,
+            api_key=settings.llm_api_key,
+            model_id=settings.default_model_id,
+            context_window=discovered_cw or manual_cw,
+        )
+
+    raise RuntimeError(f"Model config not found for session.model_id={requested}")
 
 
 # ── VLM Resolver (Phase O3-1) ─────────────────────────────────────────────

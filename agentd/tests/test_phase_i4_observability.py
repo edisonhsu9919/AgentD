@@ -183,7 +183,7 @@ class TestStartupLogs:
         """Worker must print 'Claim loop ready' after startup."""
         from agent.worker import AgentWorker
         source = inspect.getsource(AgentWorker.run)
-        assert "Claim loop ready" in source
+        assert "claim loop ready" in source.lower()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -77,6 +77,10 @@ class BaseTool(ABC):
         """Return JSON-schema for tool input parameters."""
         ...
 
+    def canonicalize_args(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Return semantic-normalized args for dedup / circuit-breaker logic."""
+        return dict(kwargs)
+
     @abstractmethod
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
         """Run the tool and return a result dict."""

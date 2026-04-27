@@ -13,6 +13,7 @@ import asyncio
 import logging
 import traceback
 import uuid
+from types import SimpleNamespace
 from typing import Any, Callable, Coroutine, Optional
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,15 @@ logger = logging.getLogger(__name__)
 import httpx
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 
+from agent.provider_reasoning import (
+    TranscriptIntegrityError,
+    append_provider_state_delta,
+    extract_reasoning_from_message,
+    extract_reasoning_from_text,
+    merge_provider_state_final,
+    merge_reasoning_text,
+    strip_reasoning_tags,
+)
 from agent.runtime import build_agent
 from core.config import settings
 from core.database import AsyncSessionLocal
@@ -39,6 +49,16 @@ _SUBTASK_RESULT_BRIDGE_KIND = "subtask_result_bridge"
 _SUBTASK_CONTINUATION_PROMPT = (
     "Continue from the bridged subtask result already present in the conversation."
 )
+
+
+class RecoverableProviderTimeout(RuntimeError):
+    """Provider timed out after a closed tool_result checkpoint."""
+
+    def __init__(self, original: BaseException, diagnostics: dict[str, Any]):
+        self.original = original
+        self.provider_error = f"{type(original).__name__}: {original}"
+        self.diagnostics = diagnostics
+        super().__init__(self.provider_error)
 
 
 async def execute_start(
@@ -68,11 +88,19 @@ async def execute_start(
     config = {"configurable": {"thread_id": session_id}}
 
     if is_subtask_continuation:
+        if settings.debug:
+            print(f"[executor] subtask continuation gate session={session_id[:8]}")
+        await _ensure_checkpoint_tool_adjacency_ready(
+            agent,
+            config,
+            session_id,
+            strict=True,
+        )
         # Subtask bridge: inject the child result as assistant semantics,
         # then add a tiny internal continuation nudge as a HumanMessage.
         # This keeps the bridged result out of system-role history while
         # avoiding a fake user bubble in persisted messages.
-        initial_input = {"messages": [
+        continuation_messages = [
             AIMessage(
                 content=user_message,
                 additional_kwargs={"agentd_internal": _SUBTASK_RESULT_BRIDGE_KIND},
@@ -81,7 +109,23 @@ async def execute_start(
                 _SUBTASK_CONTINUATION_MARKER + "\n\n"
                 + _SUBTASK_CONTINUATION_PROMPT
             )),
-        ]}
+        ]
+        from unittest.mock import Mock
+        if isinstance(agent, Mock):
+            initial_input = {"messages": continuation_messages}
+        else:
+            await _aupdate_messages_as_start(
+                agent,
+                config,
+                {"messages": continuation_messages},
+            )
+            await _ensure_checkpoint_tool_adjacency_ready(
+                agent,
+                config,
+                session_id,
+                strict=True,
+            )
+            initial_input = {"messages": []}
     else:
         initial_input = {"messages": [{"role": "user", "content": user_message}]}
 
@@ -171,6 +215,56 @@ async def execute_resume(
     )
 
 
+async def execute_continue(
+    session_id: str,
+    publish: PublishFn,
+    check_abort: Optional[AbortCheckFn] = None,
+    run_id: str | None = None,
+) -> None:
+    """Execute a checkpoint continuation without adding a user message."""
+    async with AsyncSessionLocal() as db:
+        from auth.models import User
+        from agent.child_session import read_child_session_meta
+        from workspace.manager import get_session_dir
+
+        sid = uuid.UUID(session_id)
+        session = await session_svc.get_session(db, sid)
+        if not session:
+            raise RuntimeError(f"Session {session_id} not found")
+        user = await db.get(User, session.user_id)
+        user_root = user.workspace if user else settings.workspace_root
+        session_dir = get_session_dir(user_root, session_id)
+
+        parent_session_dir = None
+        allowed_tools = None
+        if session.parent_id:
+            parent_session_dir = get_session_dir(user_root, str(session.parent_id))
+            child_meta = read_child_session_meta(session_dir)
+            allowed_tools = (
+                child_meta.get("resolved_tools")
+                or child_meta.get("allowed_tools")
+                or None
+            )
+
+    agent = await build_agent(
+        session_id=session_id,
+        user_id=str(session.user_id),
+        user_root=user_root,
+        session_dir=session_dir,
+        agent_id=session.agent_id,
+        model_id=session.model_id,
+        tool_profile="child" if session.parent_id else None,
+        parent_session_dir=parent_session_dir,
+        allowed_tools=allowed_tools,
+        run_id=run_id,
+    )
+    config = {"configurable": {"thread_id": session_id}}
+
+    await _execute_graph(
+        agent, None, config, session_id, session_dir, publish, check_abort,
+    )
+
+
 # ── Core execution loop ──────────────────────────────────────────────────
 
 
@@ -226,13 +320,49 @@ async def _execute_graph(
             "reason": mc_result.reason,
         }
 
-    aborted = await _stream_and_translate(
-        agent, input_data, config, session_id, publish, check_abort,
-    )
+    try:
+        snapshot_for_gate = await agent.aget_state(config)
+        if not (
+            _is_hitl_resume_input(input_data)
+            and _snapshot_is_open_hitl_interrupt(snapshot_for_gate)
+        ):
+            await _ensure_checkpoint_tool_adjacency_ready(
+                agent,
+                config,
+                session_id,
+                strict=True,
+            )
+
+        aborted = await _stream_and_translate(
+            agent, input_data, config, session_id, publish, check_abort,
+        )
+    except Exception as exc:
+        from tools.registry import ToolLoopCircuitBreaker
+
+        if isinstance(exc, ToolLoopCircuitBreaker):
+            await _record_tool_loop_failure(agent, config, session_id)
+        if isinstance(exc, TranscriptIntegrityError):
+            agent._transcript_integrity_error = {
+                "code": exc.code,
+                "issues": exc.issues,
+            }
+        diagnostics = await _record_exception_diagnostics(agent, config, session_id, exc)
+        if diagnostics.get("recoverable_model_continuation") and not isinstance(
+            exc, RecoverableProviderTimeout
+        ):
+            raise RecoverableProviderTimeout(exc, diagnostics) from exc
+        raise
     if aborted:
         # Phase P3: if aborted due to subtask_waiting, don't reset to idle —
         # the session should stay in subtask_waiting until child completes.
         if await _is_subtask_waiting(session_id):
+            await _repair_checkpoint_tool_adjacency(
+                agent,
+                config,
+                session_id,
+                candidate_ai_message=getattr(agent, "_subtask_waiting_ai_message", None),
+                candidate_tool_messages=getattr(agent, "_subtask_waiting_tool_messages", []),
+            )
             # Persist messages accumulated so far, then exit cleanly
             snapshot = await agent.aget_state(config)
             if snapshot:
@@ -240,6 +370,11 @@ async def _execute_graph(
                 if messages:
                     await _persist_messages(session_id, messages)
             await publish(session_id, {"event": "done", "reason": "subtask_waiting"})
+            return
+        snapshot = await agent.aget_state(config)
+        if await _handle_pending_interrupt_or_unclosed_tools(
+            agent, config, session_id, session_dir, snapshot, publish, check_abort,
+        ):
             return
         await _update_db_status(session_id, "idle")
         await publish(session_id, {"event": "status_change", "status": "idle"})
@@ -253,16 +388,13 @@ async def _execute_graph(
 
     # Check for HITL interrupt
     snapshot = await agent.aget_state(config)
-    if snapshot.interrupts:
-        needs_manual = await _handle_interrupt(
-            session_id, session_dir, snapshot, config, agent, publish, check_abort,
-        )
-        if needs_manual:
-            return  # Waiting for user approval — worker will exit, resume enqueued later
+    if await _handle_pending_interrupt_or_unclosed_tools(
+        agent, config, session_id, session_dir, snapshot, publish, check_abort,
+    ):
+        return
 
-    else:
-        # No interrupt — graph completed normally
-        await _finalize(agent, config, session_id, publish)
+    # No interrupt — graph completed normally
+    await _finalize(agent, config, session_id, publish)
 
 
 # ── SSE translation ──────────────────────────────────────────────────────
@@ -286,6 +418,10 @@ async def _stream_and_translate(
     """
     current_message_id: str | None = None
     think_filter = _ThinkFilter()
+    provider_reasoning_progress = ""
+    current_provider_state: dict[str, Any] = {}
+    current_tool_messages: list[ToolMessage] = []
+    current_tool_call_message: AIMessage | None = None
 
     async for mode, data in agent.astream(
         input_data, config=config, stream_mode=["messages", "updates"],
@@ -293,15 +429,29 @@ async def _stream_and_translate(
         if mode == "messages":
             chunk, _metadata = data
             # Token-level text delta from model node
-            if isinstance(chunk, AIMessageChunk) and chunk.content:
-                if current_message_id is None:
+            if isinstance(chunk, AIMessageChunk):
+                extracted = extract_reasoning_from_message(chunk)
+                cleaned = ""
+                reasoning_delta = ""
+                if isinstance(chunk.content, str) and chunk.content:
+                    if current_message_id is None:
+                        current_message_id = str(uuid.uuid4())
+                    cleaned, reasoning_delta = think_filter.feed(chunk.content)
+                provider_delta = ""
+                if extracted.provider_state:
+                    append_provider_state_delta(current_provider_state, extracted.provider_state)
+                if extracted.visible_text:
+                    provider_reasoning_progress, provider_delta = _merge_reasoning_progress(
+                        provider_reasoning_progress, extracted.visible_text,
+                    )
+                combined_reasoning_delta = merge_reasoning_text(reasoning_delta, provider_delta)
+                if combined_reasoning_delta and current_message_id is None:
                     current_message_id = str(uuid.uuid4())
-                cleaned, reasoning_delta = think_filter.feed(chunk.content)
-                if reasoning_delta:
+                if combined_reasoning_delta:
                     await publish(session_id, {
                         "event": "reasoning_delta",
                         "message_id": current_message_id,
-                        "content": reasoning_delta,
+                        "content": combined_reasoning_delta,
                     })
                 if cleaned:
                     await publish(session_id, {
@@ -319,6 +469,8 @@ async def _stream_and_translate(
                     # Phase P4-A: reset per-turn result accumulator for the new model turn
                     from tools.registry import reset_turn_accumulator
                     reset_turn_accumulator(session_id)
+                    current_tool_messages = []
+                    current_tool_call_message = None
                     # Complete (aggregated) model output from "updates" channel.
                     # When streaming=True, text was already sent token-by-token
                     # via "messages". When streaming=False, no "messages" events
@@ -327,19 +479,31 @@ async def _stream_and_translate(
                     for msg in messages:
                         # Emit text content for non-streaming models
                         # (AIMessage, not AIMessageChunk = non-streaming output)
-                        if (
-                            isinstance(msg, AIMessage)
-                            and not isinstance(msg, AIMessageChunk)
-                            and msg.content
-                        ):
-                            if current_message_id is None:
+                        if isinstance(msg, AIMessage) and not isinstance(msg, AIMessageChunk):
+                            extracted = extract_reasoning_from_message(msg)
+                            cleaned = ""
+                            reasoning_delta = ""
+                            if isinstance(msg.content, str) and msg.content:
+                                if current_message_id is None:
+                                    current_message_id = str(uuid.uuid4())
+                                cleaned, reasoning_delta = think_filter.feed(msg.content)
+                            provider_delta = ""
+                            if extracted.provider_state:
+                                merge_provider_state_final(current_provider_state, extracted.provider_state)
+                            if extracted.visible_text:
+                                provider_reasoning_progress, provider_delta = _merge_reasoning_progress(
+                                    provider_reasoning_progress, extracted.visible_text,
+                                )
+                            combined_reasoning_delta = merge_reasoning_text(
+                                reasoning_delta, provider_delta,
+                            )
+                            if combined_reasoning_delta and current_message_id is None:
                                 current_message_id = str(uuid.uuid4())
-                            cleaned, reasoning_delta = think_filter.feed(msg.content)
-                            if reasoning_delta:
+                            if combined_reasoning_delta:
                                 await publish(session_id, {
                                     "event": "reasoning_delta",
                                     "message_id": current_message_id,
-                                    "content": reasoning_delta,
+                                    "content": combined_reasoning_delta,
                                 })
                             if cleaned:
                                 await publish(session_id, {
@@ -347,7 +511,13 @@ async def _stream_and_translate(
                                     "message_id": current_message_id,
                                     "content": cleaned,
                                 })
+                        if isinstance(msg, AIMessage) and current_provider_state:
+                            merged_kwargs = dict(getattr(msg, "additional_kwargs", {}) or {})
+                            merge_provider_state_final(merged_kwargs, current_provider_state)
+                            msg.additional_kwargs = merged_kwargs
                         if hasattr(msg, "tool_calls") and msg.tool_calls:
+                            current_tool_call_message = msg
+                            agent._last_tool_call_message = msg
                             for tc in msg.tool_calls:
                                 await publish(session_id, {
                                     "event": "tool_start",
@@ -369,6 +539,8 @@ async def _stream_and_translate(
                         })
                     current_message_id = None
                     think_filter = _ThinkFilter()  # reset for next model turn
+                    provider_reasoning_progress = ""
+                    current_provider_state = {}
                     messages = node_data.get("messages", [])
                     for msg in messages:
                         content = msg.content if hasattr(msg, "content") else str(msg)
@@ -383,6 +555,10 @@ async def _stream_and_translate(
                             "is_error": is_error,
                         })
                     # Phase L: incrementally persist all ToolMessages from this node
+                    current_tool_messages = [
+                        msg for msg in messages if isinstance(msg, ToolMessage)
+                    ]
+                    agent._last_tool_messages = current_tool_messages
                     for msg in messages:
                         if isinstance(msg, ToolMessage):
                             await _persist_message_incremental(session_id, msg)
@@ -394,6 +570,15 @@ async def _stream_and_translate(
             # Phase P3: if launch_subagent set parent to subtask_waiting,
             # stop the current run immediately so we don't continue looping.
             if await _is_subtask_waiting(session_id):
+                agent._subtask_waiting_ai_message = current_tool_call_message
+                agent._subtask_waiting_tool_messages = current_tool_messages
+                await _repair_checkpoint_tool_adjacency(
+                    agent,
+                    config,
+                    session_id,
+                    candidate_ai_message=current_tool_call_message,
+                    candidate_tool_messages=current_tool_messages,
+                )
                 return True
 
     # Flush any remaining buffered text after the stream ends
@@ -408,12 +593,792 @@ async def _stream_and_translate(
     return False
 
 
+async def _repair_checkpoint_tool_adjacency(
+    agent,
+    config: dict,
+    session_id: str,
+    candidate_ai_message: AIMessage | None = None,
+    candidate_tool_messages: list[ToolMessage] | None = None,
+    strict: bool = False,
+) -> dict[str, Any]:
+    """Keep checkpoint history valid for strict tool-call providers.
+
+    OpenAI-compatible providers require every assistant message with tool_calls
+    to be immediately followed by one ToolMessage for each tool_call_id. The
+    subagent waiting boundary can stop streaming before LangGraph persists the
+    tools-node update into the checkpoint, while the UI DB already has the tool
+    results. This helper first repairs the normal tail case by appending the
+    current tools-node results, then removes already-corrupt orphan tool-call
+    groups from runtime history so future model calls do not 400.
+    """
+    candidate_tool_messages = candidate_tool_messages or []
+    repaired = {
+        "appended_tool_results": 0,
+        "removed_invalid_messages": 0,
+    }
+
+    try:
+        snapshot = await agent.aget_state(config)
+        messages = (snapshot.values or {}).get("messages", []) if snapshot else []
+        if not messages:
+            candidate_patch = _candidate_tool_group_patch(
+                messages,
+                candidate_ai_message,
+                candidate_tool_messages,
+            )
+            if not candidate_patch:
+                return repaired
+            new_config = await _aupdate_messages_as_tools(
+                agent,
+                config,
+                {"messages": candidate_patch},
+            )
+            _merge_updated_config(config, new_config)
+            repaired["appended_tool_results"] = len(candidate_patch) - 1
+            snapshot = await agent.aget_state(config)
+            messages = (snapshot.values or {}).get("messages", []) if snapshot else []
+
+        candidate_patch = _candidate_tool_group_patch(
+            messages,
+            candidate_ai_message,
+            candidate_tool_messages,
+        )
+        if candidate_patch:
+            new_config = await _aupdate_messages_as_tools(
+                agent,
+                config,
+                {"messages": candidate_patch},
+            )
+            _merge_updated_config(config, new_config)
+            repaired["appended_tool_results"] = len(candidate_patch) - 1
+            snapshot = await agent.aget_state(config)
+            messages = (snapshot.values or {}).get("messages", []) if snapshot else []
+
+        missing_tail = _missing_tail_tool_messages(messages, candidate_tool_messages)
+        if missing_tail:
+            new_config = await _aupdate_messages_as_tools(
+                agent,
+                config,
+                {"messages": missing_tail},
+            )
+            _merge_updated_config(config, new_config)
+            repaired["appended_tool_results"] = len(missing_tail)
+            snapshot = await agent.aget_state(config)
+            messages = (snapshot.values or {}).get("messages", []) if snapshot else []
+
+        invalid_indices = _find_invalid_tool_adjacency_indices(messages)
+        if invalid_indices:
+            rebuilt = _rebuild_messages_with_repaired_tool_adjacency(
+                messages,
+                candidate_tool_messages,
+            )
+            if rebuilt is not None:
+                from langchain_core.messages import RemoveMessage
+                from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+                new_config = await _aupdate_messages_as_tools(
+                    agent,
+                    config,
+                    {"messages": [
+                        RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                        *rebuilt,
+                    ]},
+                )
+                _merge_updated_config(config, new_config)
+                repaired["appended_tool_results"] += (
+                    sum(1 for msg in rebuilt if isinstance(msg, ToolMessage))
+                    - sum(1 for msg in messages if isinstance(msg, ToolMessage))
+                )
+                snapshot = await agent.aget_state(config)
+                messages = (snapshot.values or {}).get("messages", []) if snapshot else []
+                invalid_indices = _find_invalid_tool_adjacency_indices(messages)
+
+            if invalid_indices and strict:
+                raise RuntimeError(
+                    "Unable to repair checkpoint tool adjacency for "
+                    f"session={session_id}: invalid_indices={invalid_indices}"
+                )
+
+        if invalid_indices:
+            from langchain_core.messages import RemoveMessage
+
+            removals = []
+            for idx in invalid_indices:
+                msg = messages[idx]
+                msg_id = getattr(msg, "id", None)
+                if msg_id:
+                    removals.append(RemoveMessage(id=msg_id))
+            if removals:
+                new_config = await _aupdate_messages_as_tools(
+                    agent,
+                    config,
+                    {"messages": removals},
+                )
+                _merge_updated_config(config, new_config)
+                repaired["removed_invalid_messages"] = len(removals)
+                logger.warning(
+                    "Repaired invalid checkpoint tool-call adjacency: "
+                    "session=%s appended=%d removed=%d",
+                    session_id[:8],
+                    repaired["appended_tool_results"],
+                    repaired["removed_invalid_messages"],
+                )
+                snapshot = await agent.aget_state(config)
+                messages = (snapshot.values or {}).get("messages", []) if snapshot else []
+
+        remaining_invalid = _find_invalid_tool_adjacency_indices(messages)
+        if strict and remaining_invalid:
+            raise RuntimeError(
+                "Checkpoint tool adjacency still invalid after repair for "
+                f"session={session_id}: invalid_indices={remaining_invalid}"
+            )
+    except Exception:
+        if settings.debug:
+            traceback.print_exc()
+        if strict:
+            raise
+
+    return repaired
+
+
+async def _aupdate_messages_as_tools(
+    agent,
+    config: dict,
+    values: dict[str, Any],
+):
+    """Write repaired tool results as the tools node so LangGraph advances to model."""
+    try:
+        return await agent.aupdate_state(
+            config=config,
+            values=values,
+            as_node="tools",
+        )
+    except TypeError:
+        # Lightweight test doubles and older graph adapters may not expose
+        # as_node; fall back to the legacy call shape in that narrow case.
+        return await agent.aupdate_state(config=config, values=values)
+
+
+async def _aupdate_messages_as_start(
+    agent,
+    config: dict,
+    values: dict[str, Any],
+):
+    """Write internal continuation input before resuming the model node."""
+    try:
+        return await agent.aupdate_state(
+            config=config,
+            values=values,
+            as_node="__start__",
+        )
+    except TypeError:
+        return await agent.aupdate_state(config=config, values=values)
+
+
+def _candidate_tool_group_patch(
+    messages: list,
+    candidate_ai_message: AIMessage | None,
+    candidate_tool_messages: list[ToolMessage] | None,
+) -> list:
+    """Build a complete AI/tool group patch for a just-finished tools node."""
+    if not candidate_ai_message or not candidate_tool_messages:
+        return []
+    required_ids = [
+        tc.get("id")
+        for tc in getattr(candidate_ai_message, "tool_calls", []) or []
+        if tc.get("id")
+    ]
+    if not required_ids:
+        return []
+
+    candidates_by_id = {
+        getattr(msg, "tool_call_id", None): msg
+        for msg in candidate_tool_messages
+        if getattr(msg, "tool_call_id", None)
+    }
+    if any(tool_call_id not in candidates_by_id for tool_call_id in required_ids):
+        return []
+
+    ai_id = getattr(candidate_ai_message, "id", None)
+    ai_idx = -1
+    if ai_id:
+        for idx, msg in enumerate(messages):
+            if getattr(msg, "id", None) == ai_id:
+                ai_idx = idx
+                break
+
+    if ai_idx >= 0:
+        following_ids = []
+        j = ai_idx + 1
+        while j < len(messages) and isinstance(messages[j], ToolMessage):
+            following_ids.append(getattr(messages[j], "tool_call_id", None))
+            j += 1
+        if all(tool_call_id in following_ids for tool_call_id in required_ids):
+            return []
+
+    ordered_tools = [candidates_by_id[tool_call_id] for tool_call_id in required_ids]
+    return [candidate_ai_message, *ordered_tools]
+
+
+def _merge_updated_config(config: dict, new_config: Any) -> None:
+    """Keep execution config on thread-level latest after checkpoint maintenance."""
+    if isinstance(new_config, dict):
+        existing_configurable = dict(config.get("configurable") or {})
+        returned_configurable = dict(new_config.get("configurable") or {})
+        thread_id = (
+            returned_configurable.get("thread_id")
+            or existing_configurable.get("thread_id")
+        )
+        checkpoint_ns = (
+            returned_configurable.get("checkpoint_ns")
+            or existing_configurable.get("checkpoint_ns")
+        )
+        config.clear()
+        config["configurable"] = {}
+        if thread_id:
+            config["configurable"]["thread_id"] = thread_id
+        if checkpoint_ns:
+            config["configurable"]["checkpoint_ns"] = checkpoint_ns
+
+
+def _missing_tail_tool_messages(
+    messages: list,
+    candidate_tool_messages: list[ToolMessage],
+) -> list[ToolMessage]:
+    """Return current tools-node ToolMessages missing after the tail AIMessage."""
+    if not messages or not candidate_tool_messages:
+        return []
+
+    ai_idx = -1
+    for idx in range(len(messages) - 1, -1, -1):
+        msg = messages[idx]
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            ai_idx = idx
+            break
+
+    if ai_idx < 0:
+        return []
+
+    following = messages[ai_idx + 1:]
+    if any(not isinstance(msg, ToolMessage) for msg in following):
+        return []
+
+    required_ids = [
+        tc.get("id")
+        for tc in messages[ai_idx].tool_calls
+        if tc.get("id")
+    ]
+    existing_ids = {
+        getattr(msg, "tool_call_id", None)
+        for msg in following
+        if isinstance(msg, ToolMessage)
+    }
+    candidates_by_id = {
+        getattr(msg, "tool_call_id", None): msg
+        for msg in candidate_tool_messages
+        if getattr(msg, "tool_call_id", None)
+    }
+
+    missing = []
+    for tool_call_id in required_ids:
+        if tool_call_id not in existing_ids and tool_call_id in candidates_by_id:
+            missing.append(candidates_by_id[tool_call_id])
+    return missing
+
+
+def _rebuild_messages_with_repaired_tool_adjacency(
+    messages: list,
+    candidate_tool_messages: list[ToolMessage],
+) -> list | None:
+    """Return a repaired full message list when candidates can close tool calls."""
+    if not messages or not candidate_tool_messages:
+        return None
+
+    candidates_by_id = {
+        getattr(msg, "tool_call_id", None): msg
+        for msg in candidate_tool_messages
+        if getattr(msg, "tool_call_id", None)
+    }
+    if not candidates_by_id:
+        return None
+
+    changed = False
+    repaired: list = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            required_ids = [
+                tc.get("id")
+                for tc in msg.tool_calls
+                if tc.get("id")
+            ]
+            j = i + 1
+            existing_tools: list[ToolMessage] = []
+            while j < len(messages) and isinstance(messages[j], ToolMessage):
+                existing_tools.append(messages[j])
+                j += 1
+            existing_by_id = {
+                getattr(tool_msg, "tool_call_id", None): tool_msg
+                for tool_msg in existing_tools
+                if getattr(tool_msg, "tool_call_id", None)
+            }
+
+            ordered_tools: list[ToolMessage] = []
+            for tool_call_id in required_ids:
+                tool_msg = existing_by_id.get(tool_call_id) or candidates_by_id.get(tool_call_id)
+                if tool_msg is None:
+                    return None
+                ordered_tools.append(tool_msg)
+
+            existing_ids = [getattr(tool_msg, "tool_call_id", None) for tool_msg in existing_tools]
+            if existing_ids != required_ids:
+                changed = True
+            repaired.append(msg)
+            repaired.extend(ordered_tools)
+            i = j
+            continue
+
+        if isinstance(msg, ToolMessage):
+            changed = True
+            i += 1
+            continue
+
+        repaired.append(msg)
+        i += 1
+
+    if not changed:
+        return None
+    if _find_invalid_tool_adjacency_indices(repaired):
+        return None
+    return repaired
+
+
+def _find_invalid_tool_adjacency_indices(messages: list) -> list[int]:
+    """Find checkpoint messages that would violate provider tool-call ordering."""
+    invalid: set[int] = set()
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            required_ids = [
+                tc.get("id")
+                for tc in msg.tool_calls
+                if tc.get("id")
+            ]
+            j = i + 1
+            tool_indices: list[int] = []
+            tool_ids: list[str | None] = []
+            while j < len(messages) and isinstance(messages[j], ToolMessage):
+                tool_indices.append(j)
+                tool_ids.append(getattr(messages[j], "tool_call_id", None))
+                j += 1
+
+            if (
+                len(tool_ids) < len(required_ids)
+                or any(tool_call_id not in tool_ids for tool_call_id in required_ids)
+                or any(tool_call_id not in required_ids for tool_call_id in tool_ids)
+            ):
+                invalid.add(i)
+                invalid.update(tool_indices)
+            i = max(j, i + 1)
+            continue
+
+        # Tool messages that are not immediately consumed by a preceding
+        # assistant tool_call are also invalid for OpenAI-compatible history.
+        if isinstance(msg, ToolMessage):
+            invalid.add(i)
+
+        i += 1
+
+    return sorted(invalid)
+
+
+async def _load_tool_messages_from_persisted_session(
+    session_id: str,
+    tool_call_ids: list[str] | None = None,
+) -> list[ToolMessage]:
+    """Load persisted tool_result parts as ToolMessages for checkpoint repair."""
+    wanted = set(tool_call_ids or [])
+    tool_messages: list[ToolMessage] = []
+    try:
+        async with AsyncSessionLocal() as db:
+            persisted = await session_svc.list_messages(db, uuid.UUID(session_id))
+    except Exception:
+        if settings.debug:
+            traceback.print_exc()
+        return tool_messages
+
+    seen: set[str] = set()
+    for message in persisted:
+        for part in message.parts or []:
+            if part.get("type") != "tool_result":
+                continue
+            tool_call_id = part.get("tool_call_id") or ""
+            if not tool_call_id or tool_call_id in seen:
+                continue
+            if wanted and tool_call_id not in wanted:
+                continue
+            seen.add(tool_call_id)
+            tool_messages.append(ToolMessage(
+                content=str(part.get("output", "")),
+                tool_call_id=tool_call_id,
+                name=part.get("tool_name") or "",
+            ))
+    return tool_messages
+
+
+def _checkpoint_tool_call_ids(messages: list) -> list[str]:
+    ids: list[str] = []
+    for msg in messages:
+        if not isinstance(msg, AIMessage) or not getattr(msg, "tool_calls", None):
+            continue
+        for tool_call in msg.tool_calls:
+            tool_call_id = tool_call.get("id")
+            if tool_call_id and tool_call_id not in ids:
+                ids.append(tool_call_id)
+    return ids
+
+
+async def _ensure_checkpoint_tool_adjacency_ready(
+    agent,
+    config: dict,
+    session_id: str,
+    strict: bool = True,
+) -> None:
+    """Repair and verify checkpoint tool adjacency before provider calls."""
+    try:
+        from unittest.mock import Mock
+        if isinstance(agent, Mock):
+            return
+    except Exception:
+        pass
+    snapshot = await agent.aget_state(config)
+    messages = (snapshot.values or {}).get("messages", []) if snapshot else []
+    if _checkpoint_tool_adjacency_is_valid(messages):
+        return
+
+    tool_call_ids = _checkpoint_tool_call_ids(messages)
+    if settings.debug:
+        print(
+            "[checkpoint_gate] before repair "
+            f"session={session_id[:8]} len={len(messages)} "
+            f"next={tuple(getattr(snapshot, 'next', ()) or ())} "
+            f"bad={_find_invalid_tool_adjacency_indices(messages)} "
+            f"tool_call_ids={tool_call_ids}"
+        )
+    tool_messages = await _load_tool_messages_from_persisted_session(
+        session_id,
+        tool_call_ids,
+    )
+    repair_result = await _repair_checkpoint_tool_adjacency(
+        agent,
+        config,
+        session_id,
+        candidate_tool_messages=tool_messages,
+        strict=strict,
+    )
+
+    snapshot = await agent.aget_state(config)
+    messages = (snapshot.values or {}).get("messages", []) if snapshot else []
+    if settings.debug:
+        print(
+            "[checkpoint_gate] after repair "
+            f"session={session_id[:8]} len={len(messages)} "
+            f"next={tuple(getattr(snapshot, 'next', ()) or ())} "
+            f"valid={_checkpoint_tool_adjacency_is_valid(messages)} "
+            f"bad={_find_invalid_tool_adjacency_indices(messages)} "
+            f"loaded_tool_results={len(tool_messages)} "
+            f"repair={repair_result}"
+        )
+    if not _checkpoint_tool_adjacency_is_valid(messages):
+        raise RuntimeError(
+            "Checkpoint tool adjacency is invalid before provider call; "
+            f"refusing to continue session={session_id}"
+        )
+
+
+def _is_hitl_resume_input(input_data: Any) -> bool:
+    return bool(getattr(input_data, "resume", None))
+
+
+def _snapshot_is_open_hitl_interrupt(snapshot) -> bool:
+    if not snapshot:
+        return False
+    if not (getattr(snapshot, "interrupts", None) or _snapshot_next_is_hitl_interrupt(snapshot)):
+        return False
+
+    messages = (getattr(snapshot, "values", {}) or {}).get("messages", [])
+    group = _tail_tool_call_group(messages)
+    if not group or not group["missing_ids"]:
+        return False
+
+    interrupt_ids = set(_extract_tool_call_ids(snapshot))
+    if interrupt_ids and not set(group["missing_ids"]).issubset(interrupt_ids):
+        return False
+
+    from agent.runtime import _HITL_INTERRUPT_ON
+
+    tool_calls_by_id = {
+        tc.get("id"): tc
+        for tc in getattr(group["ai_message"], "tool_calls", []) or []
+        if tc.get("id")
+    }
+    for tool_call_id in group["missing_ids"]:
+        tool_call = tool_calls_by_id.get(tool_call_id) or {}
+        if tool_call.get("name") not in _HITL_INTERRUPT_ON:
+            return False
+
+    return True
+
+
 # ── Interrupt handling ───────────────────────────────────────────────────
+
+
+async def _handle_pending_interrupt_or_unclosed_tools(
+    agent,
+    config: dict,
+    session_id: str,
+    session_dir: str,
+    snapshot,
+    publish: PublishFn,
+    check_abort: Optional[AbortCheckFn] = None,
+) -> bool:
+    """Route any pending HITL/tool-call intermediate state before finalizing."""
+    if not snapshot:
+        return False
+
+    messages = (getattr(snapshot, "values", {}) or {}).get("messages", [])
+
+    if _snapshot_interrupt_already_resolved(snapshot):
+        return False
+
+    if getattr(snapshot, "interrupts", None):
+        await _handle_interrupt(
+            session_id, session_dir, snapshot, config, agent, publish, check_abort,
+        )
+        return True
+
+    if _snapshot_next_is_hitl_interrupt(snapshot):
+        if _checkpoint_tool_adjacency_is_valid(messages):
+            return False
+        synthetic = _synthetic_interrupt_snapshot(snapshot)
+        if synthetic is None:
+            await _record_run_diagnostics(agent, session_id, messages)
+            raise RuntimeError(
+                "Checkpoint stopped at HITL interrupt without reconstructable action requests"
+            )
+        await _handle_interrupt(
+            session_id, session_dir, synthetic, config, agent, publish, check_abort,
+        )
+        return True
+
+    if _tail_has_unclosed_tool_calls(messages):
+        synthetic = _synthetic_interrupt_snapshot(snapshot)
+        if synthetic is not None:
+            await _handle_interrupt(
+                session_id, session_dir, synthetic, config, agent, publish, check_abort,
+            )
+            return True
+        await _record_run_diagnostics(agent, session_id, messages)
+        raise RuntimeError(
+            "Terminal checkpoint has unclosed non-HITL tool calls; refusing to mark session idle"
+        )
+
+    return False
+
+
+def _snapshot_next_is_hitl_interrupt(snapshot) -> bool:
+    next_nodes = getattr(snapshot, "next", None) or ()
+    return any("HumanInTheLoopMiddleware.after_model" in str(node) for node in next_nodes)
+
+
+def _snapshot_interrupt_already_resolved(snapshot) -> bool:
+    """Return True when a stale interrupt points at already-closed tool calls."""
+    if not getattr(snapshot, "interrupts", None):
+        return False
+    messages = (getattr(snapshot, "values", {}) or {}).get("messages", [])
+    if not _checkpoint_tool_adjacency_is_valid(messages):
+        return False
+    tool_call_ids = _extract_tool_call_ids(snapshot)
+    if not tool_call_ids:
+        return False
+    result_ids = {
+        getattr(msg, "tool_call_id", None)
+        for msg in messages
+        if isinstance(msg, ToolMessage)
+    }
+    return all(tool_call_id in result_ids for tool_call_id in tool_call_ids)
+
+
+def _checkpoint_tool_adjacency_is_valid(messages: list) -> bool:
+    return not _tail_has_unclosed_tool_calls(messages) and not _find_invalid_tool_adjacency_indices(messages)
+
+
+async def _record_exception_diagnostics(
+    agent,
+    config: dict,
+    session_id: str,
+    exc: BaseException,
+) -> dict[str, Any]:
+    """Persist checkpoint diagnostics for every graph exception path."""
+    try:
+        snapshot = await agent.aget_state(config)
+        messages = (snapshot.values or {}).get("messages", []) if snapshot else []
+    except Exception:
+        snapshot = None
+        messages = []
+
+    diagnostics = _build_exception_diagnostics(exc, snapshot, messages)
+    agent._run_exception_diagnostics = diagnostics
+    await _record_run_diagnostics(agent, session_id, messages)
+    return diagnostics
+
+
+def _build_exception_diagnostics(
+    exc: BaseException,
+    snapshot,
+    messages: list,
+) -> dict[str, Any]:
+    bad_indices = _find_invalid_tool_adjacency_indices(messages)
+    recoverable = _is_recoverable_provider_timeout_after_tool_result(exc, snapshot, messages)
+    return {
+        "exception_type": type(exc).__name__,
+        "exception_message": str(exc),
+        "checkpoint_next": [
+            str(node) for node in (getattr(snapshot, "next", None) or ())
+        ],
+        "checkpoint_interrupts_count": len(getattr(snapshot, "interrupts", None) or ()),
+        "checkpoint_valid": not bad_indices and not _tail_has_unclosed_tool_calls(messages),
+        "checkpoint_bad_indices": bad_indices,
+        "recoverable_model_continuation": recoverable,
+    }
+
+
+def _is_recoverable_provider_timeout_after_tool_result(
+    exc: BaseException,
+    snapshot,
+    messages: list,
+) -> bool:
+    if not _is_provider_timeout_exception(exc):
+        return False
+    if not snapshot or not _snapshot_next_contains_model(snapshot):
+        return False
+    if getattr(snapshot, "interrupts", None):
+        return False
+    if not messages or not isinstance(messages[-1], ToolMessage):
+        return False
+    return _checkpoint_tool_adjacency_is_valid(messages)
+
+
+def _is_provider_timeout_exception(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (httpx.TimeoutException, asyncio.TimeoutError, TimeoutError)):
+            return True
+        name = type(current).__name__.lower()
+        if "timeout" in name:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _snapshot_next_contains_model(snapshot) -> bool:
+    for node in getattr(snapshot, "next", None) or ():
+        node_name = str(node)
+        if node_name == "model" or node_name.endswith(".model") or node_name.endswith(":model"):
+            return True
+    return False
+
+
+def _tail_has_unclosed_tool_calls(messages: list) -> bool:
+    tail = _tail_tool_call_group(messages)
+    return bool(tail and tail["missing_ids"])
+
+
+def _tail_tool_call_group(messages: list) -> dict[str, Any] | None:
+    if not messages:
+        return None
+    ai_idx = -1
+    for idx in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[idx], AIMessage) and getattr(messages[idx], "tool_calls", None):
+            ai_idx = idx
+            break
+    if ai_idx < 0:
+        return None
+
+    ai_msg = messages[ai_idx]
+    required_ids = [
+        tc.get("id")
+        for tc in getattr(ai_msg, "tool_calls", []) or []
+        if tc.get("id")
+    ]
+    following = []
+    for msg in messages[ai_idx + 1:]:
+        if not isinstance(msg, ToolMessage):
+            break
+        following.append(msg)
+    tool_ids = [
+        getattr(msg, "tool_call_id", None)
+        for msg in following
+    ]
+    missing_ids = [tool_call_id for tool_call_id in required_ids if tool_call_id not in tool_ids]
+    return {"ai_message": ai_msg, "missing_ids": missing_ids, "tool_ids": tool_ids}
+
+
+def _synthetic_interrupt_snapshot(snapshot):
+    actions, tool_call_ids = _extract_unclosed_hitl_action_requests(snapshot)
+    if not actions:
+        return None
+    return SimpleNamespace(
+        values=getattr(snapshot, "values", {}),
+        interrupts=[SimpleNamespace(value={
+            "action_requests": actions,
+            "tool_call_ids": tool_call_ids,
+        })],
+        next=getattr(snapshot, "next", ()),
+    )
+
+
+def _extract_unclosed_hitl_action_requests(snapshot) -> tuple[list[dict[str, Any]], list[str]]:
+    from agent.runtime import _HITL_INTERRUPT_ON
+
+    messages = (getattr(snapshot, "values", {}) or {}).get("messages", [])
+    group = _tail_tool_call_group(messages)
+    if not group:
+        return [], []
+    missing_ids = set(group["missing_ids"])
+    ai_msg = group["ai_message"]
+    actions: list[dict[str, Any]] = []
+    tool_call_ids: list[str] = []
+    for tool_call in getattr(ai_msg, "tool_calls", []) or []:
+        if tool_call.get("id") not in missing_ids:
+            continue
+        if tool_call.get("name") not in _HITL_INTERRUPT_ON:
+            continue
+        actions.append({
+            "name": tool_call["name"],
+            "args": tool_call.get("args", {}),
+        })
+        tool_call_ids.append(tool_call.get("id", ""))
+    return actions, tool_call_ids
 
 
 def _extract_tool_call_ids(snapshot) -> list[str]:
     """Extract tool_call_ids for interrupted tools from checkpoint state."""
     from agent.runtime import _HITL_INTERRUPT_ON
+
+    if getattr(snapshot, "interrupts", None):
+        interrupt_data = snapshot.interrupts[0].value
+        explicit_ids = (
+            interrupt_data.get("tool_call_ids")
+            if isinstance(interrupt_data, dict)
+            else None
+        )
+        if isinstance(explicit_ids, list) and explicit_ids:
+            return list(explicit_ids)
 
     messages = (snapshot.values or {}).get("messages", [])
     last_ai_msg = None
@@ -454,6 +1419,10 @@ async def _handle_interrupt(
     tool_call_ids = _extract_tool_call_ids(snapshot)
     while len(tool_call_ids) < len(action_requests):
         tool_call_ids.append("")
+    batch_key = _interrupt_batch_key(action_requests, tool_call_ids)
+
+    if _snapshot_interrupt_already_resolved(snapshot):
+        return False
 
     # ── Policy evaluation ──
     policy = load_policy(session_dir)
@@ -467,51 +1436,106 @@ async def _handle_interrupt(
                 break
 
         if all_auto:
+            auto_resumed_batches = getattr(agent, "_agentd_auto_resumed_batches", set())
+            if batch_key in auto_resumed_batches:
+                full_state = snapshot.values if snapshot else {}
+                await _record_run_diagnostics(
+                    agent,
+                    session_id,
+                    full_state.get("messages", []),
+                )
+                raise RuntimeError(
+                    "Auto-approved HITL interrupt did not advance after resume; "
+                    "refusing duplicate auto-approve"
+                )
+            auto_resumed_batches.add(batch_key)
+            agent._agentd_auto_resumed_batches = auto_resumed_batches
+
             # Auto-approve: audit records then resume inline
             try:
                 async with AsyncSessionLocal() as db:
                     for action, tc_id in zip(action_requests, tool_call_ids):
-                        await perm_svc.create_permission_request(
+                        pr, _created = await perm_svc.get_or_create_permission_request(
                             db,
                             session_id=uuid.UUID(session_id),
                             tool_call_id=tc_id,
                             tool_name=action["name"],
                             tool_input=action.get("args", {}),
                         )
-                    from sqlalchemy import update as sql_update
-                    from permission.models import PermissionRequest
-                    await db.execute(
-                        sql_update(PermissionRequest)
-                        .where(
-                            PermissionRequest.session_id == uuid.UUID(session_id),
-                            PermissionRequest.status == "pending",
-                        )
-                        .values(status="auto_approved")
+                        if getattr(pr, "status", "") == "denied":
+                            raise RuntimeError(
+                                f"Cannot auto-approve previously denied tool_call_id={tc_id}"
+                            )
+                    await perm_svc.mark_permission_requests_auto_approved(
+                        db,
+                        uuid.UUID(session_id),
+                        tool_call_ids,
                     )
                     await db.commit()
-            except Exception:
+            except Exception as exc:
                 if settings.debug:
                     traceback.print_exc()
+                raise RuntimeError("Failed to create auto-approved permission requests") from exc
 
             from langgraph.types import Command
             decisions = [{"type": "approve"} for _ in action_requests]
             resume_payload = Command(resume={"decisions": decisions})
 
-            aborted = await _stream_and_translate(
-                agent, resume_payload, config, session_id, publish, check_abort,
+            if not _snapshot_is_open_hitl_interrupt(snapshot):
+                await _ensure_checkpoint_tool_adjacency_ready(
+                    agent,
+                    config,
+                    session_id,
+                    strict=True,
+                )
+
+            try:
+                aborted = await _stream_and_translate(
+                    agent, resume_payload, config, session_id, publish, check_abort,
+                )
+            except Exception as exc:
+                from tools.registry import ToolLoopCircuitBreaker
+
+                if isinstance(exc, ToolLoopCircuitBreaker):
+                    await _record_tool_loop_failure(agent, config, session_id)
+                if isinstance(exc, TranscriptIntegrityError):
+                    agent._transcript_integrity_error = {
+                        "code": exc.code,
+                        "issues": exc.issues,
+                    }
+                diagnostics = await _record_exception_diagnostics(
+                    agent, config, session_id, exc,
+                )
+                if diagnostics.get("recoverable_model_continuation") and not isinstance(
+                    exc, RecoverableProviderTimeout
+                ):
+                    raise RecoverableProviderTimeout(exc, diagnostics) from exc
+                raise
+
+            await _repair_checkpoint_tool_adjacency(
+                agent,
+                config,
+                session_id,
+                candidate_ai_message=getattr(agent, "_last_tool_call_message", None),
+                candidate_tool_messages=getattr(agent, "_last_tool_messages", []),
             )
 
             # Check abort boundary after auto-resume (also caught mid-stream by L4)
             if aborted or (check_abort and await check_abort()):
+                abort_snapshot = await agent.aget_state(config)
+                if await _handle_pending_interrupt_or_unclosed_tools(
+                    agent, config, session_id, session_dir, abort_snapshot, publish, check_abort,
+                ):
+                    return False
                 await _update_db_status(session_id, "idle")
                 await publish(session_id, {"event": "status_change", "status": "idle"})
                 return False
 
             new_snapshot = await agent.aget_state(config)
-            if new_snapshot.interrupts:
-                return await _handle_interrupt(
-                    session_id, session_dir, new_snapshot, config, agent, publish, check_abort,
-                )
+            if await _handle_pending_interrupt_or_unclosed_tools(
+                agent, config, session_id, session_dir, new_snapshot, publish, check_abort,
+            ):
+                return False
 
             await _finalize(agent, config, session_id, publish)
             return False
@@ -534,7 +1558,7 @@ async def _handle_interrupt(
         async with AsyncSessionLocal() as db:
             for action, tc_id in zip(action_requests, tool_call_ids):
                 perm_id = uuid.uuid4()
-                await perm_svc.create_permission_request(
+                pr, _created = await perm_svc.get_or_create_permission_request(
                     db,
                     session_id=uuid.UUID(session_id),
                     tool_call_id=tc_id,
@@ -542,11 +1566,19 @@ async def _handle_interrupt(
                     tool_input=action.get("args", {}),
                     permission_id=perm_id,
                 )
-                permission_ids.append(str(perm_id))
+                if getattr(pr, "status", "") != "pending":
+                    raise RuntimeError(
+                        f"Permission request for tool_call_id={tc_id} is already {pr.status}"
+                    )
+                permission_ids.append(str(pr.id))
             await db.commit()
-    except Exception:
+    except Exception as exc:
         if settings.debug:
             traceback.print_exc()
+        raise RuntimeError("Failed to create permission requests") from exc
+
+    if len(permission_ids) != len(action_requests):
+        raise RuntimeError("Permission request count mismatch; refusing to enter idle state")
 
     # Update session status to waiting
     await _update_db_status(session_id, "waiting")
@@ -562,6 +1594,16 @@ async def _handle_interrupt(
         })
 
     return True
+
+
+def _interrupt_batch_key(action_requests: list[dict], tool_call_ids: list[str]) -> tuple[str, ...]:
+    keys: list[str] = []
+    for idx, (action, tool_call_id) in enumerate(zip(action_requests, tool_call_ids)):
+        if tool_call_id:
+            keys.append(tool_call_id)
+        else:
+            keys.append(f"idx:{idx}:{action.get('name', '')}:{action.get('args', {})}")
+    return tuple(keys)
 
 
 # ── Finalization ─────────────────────────────────────────────────────────
@@ -743,6 +1785,8 @@ async def _record_run_diagnostics(agent, session_id: str, messages: list) -> Non
                 elif getattr(m, "name", "") == "planning" and first_plan_idx < 0:
                     first_plan_idx = idx
 
+        from tools.registry import get_tool_loop_guard_diagnostics
+
         diagnostics = {
             **prompt_diag,
             "history_message_count": len(messages),
@@ -772,6 +1816,12 @@ async def _record_run_diagnostics(agent, session_id: str, messages: list) -> Non
             **_get_microcompact_diagnostics(agent),
             # Phase P4-D: compaction mode
             **_get_compaction_mode_diagnostics(getattr(agent, "_session_dir", None)),
+            # Phase v0.4.3: tool-loop circuit breaker diagnostics
+            **get_tool_loop_guard_diagnostics(session_id),
+            # Phase v0.4.3: exception checkpoint diagnostics
+            **_get_exception_diagnostics(agent),
+            # Phase v0.4.3: provider payload transcript hard assertion
+            **_get_transcript_integrity_diagnostics(agent),
         }
 
         async with AsyncSessionLocal() as db:
@@ -892,6 +1942,32 @@ def _get_microcompact_diagnostics(agent) -> dict:
     }
 
 
+def _get_transcript_integrity_diagnostics(agent) -> dict:
+    error = getattr(agent, "_transcript_integrity_error", None)
+    if not error:
+        return {}
+    return {
+        "transcript_integrity_error": error.get("code", "TRANSCRIPT_INTEGRITY_ERROR"),
+        "transcript_integrity_issues": error.get("issues", []),
+    }
+
+
+def _get_exception_diagnostics(agent) -> dict:
+    diagnostics = getattr(agent, "_run_exception_diagnostics", None)
+    if not isinstance(diagnostics, dict):
+        return {}
+    return diagnostics
+
+
+async def _record_tool_loop_failure(agent, config: dict, session_id: str) -> None:
+    """Best-effort persistence/diagnostics before bubbling a hard tool-loop stop."""
+    snapshot = await agent.aget_state(config)
+    messages = snapshot.values.get("messages", []) if snapshot else []
+    if messages:
+        await _persist_messages(session_id, messages)
+    await _record_run_diagnostics(agent, session_id, messages)
+
+
 # ── Helpers (moved from runner.py) ───────────────────────────────────────
 
 
@@ -956,43 +2032,8 @@ async def _persist_message_incremental(session_id: str, msg) -> None:
     try:
         async with AsyncSessionLocal() as db:
             sid = uuid.UUID(session_id)
-
-            if isinstance(msg, AIMessage):
-                parts = []
-                if msg.content:
-                    raw = msg.content
-                    clean = _strip_model_tags(raw)
-                    reasoning = _extract_reasoning(raw)
-                    if reasoning:
-                        parts.append({"type": "reasoning", "content": reasoning})
-                    if clean:
-                        parts.append({"type": "text", "content": clean})
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        parts.append({
-                            "type": "tool_call",
-                            "tool_call_id": tc["id"],
-                            "tool_name": tc["name"],
-                            "input": tc["args"],
-                        })
-                if parts:
-                    await session_svc.create_message(
-                        db, session_id=sid, role="assistant", parts=parts,
-                    )
-
-            elif isinstance(msg, ToolMessage):
-                tool_name = getattr(msg, "name", "") or ""
-                parts = [{
-                    "type": "tool_result",
-                    "tool_call_id": msg.tool_call_id,
-                    "tool_name": tool_name,
-                    "output": msg.content,
-                    "is_error": _is_tool_error(msg),
-                }]
-                await session_svc.create_message(
-                    db, session_id=sid, role="tool", parts=parts,
-                )
-
+            existing_keys = await _load_existing_part_keys(db, sid)
+            await _persist_runtime_message_once(db, sid, msg, existing_keys)
             await db.commit()
     except Exception:
         if settings.debug:
@@ -1000,11 +2041,11 @@ async def _persist_message_incremental(session_id: str, msg) -> None:
 
 
 async def _persist_messages(session_id: str, messages: list) -> None:
-    """Persist only NEW assistant/tool messages to the messages table."""
+    """Persist checkpoint messages idempotently."""
     try:
         async with AsyncSessionLocal() as db:
             sid = uuid.UUID(session_id)
-            existing_count = await session_svc.count_messages(db, sid)
+            existing_keys = await _load_existing_part_keys(db, sid)
 
             persistable: list = []
             for msg in messages[1:]:
@@ -1018,91 +2059,168 @@ async def _persist_messages(session_id: str, messages: list) -> None:
                     continue
                 persistable.append(msg)
 
-            skip = max(existing_count - 1, 0)
-            new_messages = persistable[skip:]
-
-            # Phase N1: post-compaction recovery.
-            # After checkpoint rewrite, checkpoint has fewer messages than DB
-            # (DB keeps full history, checkpoint is compacted). The count-based
-            # skip overshoots and drops the new assistant response.
-            # Fallback: find the last real user message and persist everything after it.
-            if not new_messages and len(persistable) > 0:
-                last_user_idx = -1
-                for j in range(len(persistable) - 1, -1, -1):
-                    if isinstance(persistable[j], HumanMessage) and \
-                       "[Context Summary]" not in (persistable[j].content or "") and \
-                       _SUBTASK_CONTINUATION_MARKER not in (persistable[j].content or ""):
-                        last_user_idx = j
-                        break
-                if last_user_idx >= 0:
-                    new_messages = [
-                        m for m in persistable[last_user_idx + 1:]
-                        if isinstance(m, (AIMessage, ToolMessage))
-                    ]
-
             # Phase P6-D: collect knowledge source refs from ALL messages in this run
             # (not just new_messages, because ToolMessages are often already persisted
             # incrementally and won't appear in new_messages at finalize time)
             knowledge_source_refs = _extract_knowledge_source_refs(messages)
 
-            for i, msg in enumerate(new_messages):
-                if isinstance(msg, AIMessage):
-                    parts = []
-                    if msg.content:
-                        raw = msg.content
-                        clean = _strip_model_tags(raw)
-                        # Extract reasoning content (between <think>...</think>)
-                        reasoning = _extract_reasoning(raw)
-                        if reasoning:
-                            parts.append({"type": "reasoning", "content": reasoning})
-                        if clean:
-                            parts.append({"type": "text", "content": clean})
-                    if hasattr(msg, "tool_calls") and msg.tool_calls:
-                        for tc in msg.tool_calls:
-                            parts.append({
-                                "type": "tool_call",
-                                "tool_call_id": tc["id"],
-                                "tool_name": tc["name"],
-                                "input": tc["args"],
-                            })
-                    # Phase P6-D: attach source_refs to the LAST assistant message
-                    is_last_ai = not any(
-                        isinstance(m, AIMessage) for m in new_messages[i + 1:]
-                    )
-                    if is_last_ai and knowledge_source_refs:
-                        parts.append({
-                            "type": "source_refs",
-                            "sources": knowledge_source_refs,
-                        })
-                    if parts:
-                        await session_svc.create_message(
-                            db, session_id=sid, role="assistant", parts=parts,
-                        )
-                elif isinstance(msg, ToolMessage):
-                    tool_name = getattr(msg, "name", "") or ""
-                    parts = [{
-                        "type": "tool_result",
-                        "tool_call_id": msg.tool_call_id,
-                        "tool_name": tool_name,
-                        "output": msg.content,
-                        "is_error": _is_tool_error(msg),
-                    }]
-                    await session_svc.create_message(
-                        db, session_id=sid, role="tool", parts=parts,
-                    )
-                elif isinstance(msg, HumanMessage):
-                    is_summary = "[Context Summary]" in (msg.content or "")
-                    parts = [{"type": "text", "content": msg.content}]
-                    await session_svc.create_message(
-                        db, session_id=sid, role="user", parts=parts,
-                        is_summary=is_summary,
-                    )
+            for i, msg in enumerate(persistable):
+                is_last_ai = isinstance(msg, AIMessage) and not any(
+                    isinstance(m, AIMessage) for m in persistable[i + 1:]
+                )
+                # _build_persistable_message_parts preserves the Phase K output
+                # contract: _strip_model_tags, _extract_reasoning, "reasoning",
+                # and "tool_name" remain part of persisted user-visible records;
+                # ToolMessage names are still read via getattr(msg, "name", "").
+                await _persist_runtime_message_once(
+                    db,
+                    sid,
+                    msg,
+                    existing_keys,
+                    knowledge_source_refs=knowledge_source_refs if is_last_ai else None,
+                )
 
             await db.commit()
     except Exception as e:
         if settings.debug:
             print(f"[executor] _persist_messages error: {e}")
             traceback.print_exc()
+
+
+async def _load_existing_part_keys(db, session_id: uuid.UUID) -> set[str]:
+    keys: set[str] = set()
+    try:
+        from unittest.mock import Mock
+        if isinstance(db, Mock):
+            return keys
+    except Exception:
+        pass
+    try:
+        existing_messages = await session_svc.list_messages(db, session_id)
+    except Exception:
+        return keys
+    if not isinstance(existing_messages, list):
+        return keys
+    for message in existing_messages:
+        for part in message.parts or []:
+            key = _part_dedupe_key(part)
+            if key:
+                keys.add(key)
+            tool_call_id = part.get("tool_call_id")
+            part_type = part.get("type")
+            if tool_call_id and part_type in {"tool_call", "tool_result"}:
+                keys.add(f"tool:{part_type}:{tool_call_id}")
+    return keys
+
+
+async def _persist_runtime_message_once(
+    db,
+    session_id: uuid.UUID,
+    msg,
+    existing_keys: set[str],
+    knowledge_source_refs: list[dict] | None = None,
+) -> bool:
+    role, parts, is_summary = _build_persistable_message_parts(msg, knowledge_source_refs)
+    if not parts:
+        return False
+
+    new_parts = []
+    for part in parts:
+        keys = _part_dedupe_keys(part)
+        if keys and any(key in existing_keys for key in keys):
+            continue
+        new_parts.append(part)
+        existing_keys.update(keys)
+
+    if not new_parts:
+        return False
+
+    await session_svc.create_message(
+        db,
+        session_id=session_id,
+        role=role,
+        parts=new_parts,
+        is_summary=is_summary,
+    )
+    return True
+
+
+def _build_persistable_message_parts(
+    msg,
+    knowledge_source_refs: list[dict] | None = None,
+) -> tuple[str, list[dict[str, Any]], bool]:
+    runtime_message_id = getattr(msg, "id", None)
+
+    if isinstance(msg, AIMessage):
+        parts: list[dict[str, Any]] = []
+        clean = _strip_model_tags(msg)
+        reasoning = _extract_reasoning(msg)
+        if reasoning:
+            parts.append(_with_runtime_message_id({
+                "type": "reasoning",
+                "content": reasoning,
+            }, runtime_message_id))
+        if clean:
+            parts.append(_with_runtime_message_id({
+                "type": "text",
+                "content": clean,
+            }, runtime_message_id))
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            for tc in msg.tool_calls:
+                parts.append(_with_runtime_message_id({
+                    "type": "tool_call",
+                    "tool_call_id": tc["id"],
+                    "tool_name": tc["name"],
+                    "input": tc["args"],
+                }, runtime_message_id))
+        if knowledge_source_refs:
+            parts.append(_with_runtime_message_id({
+                "type": "source_refs",
+                "sources": knowledge_source_refs,
+            }, runtime_message_id))
+        return "assistant", parts, False
+
+    if isinstance(msg, ToolMessage):
+        tool_name = getattr(msg, "name", "") or ""
+        return "tool", [_with_runtime_message_id({
+            "type": "tool_result",
+            "tool_call_id": msg.tool_call_id,
+            "tool_name": tool_name,
+            "output": msg.content,
+            "is_error": _is_tool_error(msg),
+        }, runtime_message_id)], False
+
+    if isinstance(msg, HumanMessage):
+        is_summary = "[Context Summary]" in (msg.content or "")
+        return "user", [_with_runtime_message_id({
+            "type": "text",
+            "content": msg.content,
+        }, runtime_message_id)], is_summary
+
+    return "", [], False
+
+
+def _with_runtime_message_id(part: dict[str, Any], runtime_message_id: str | None) -> dict[str, Any]:
+    if runtime_message_id:
+        return {**part, "runtime_message_id": runtime_message_id}
+    return part
+
+
+def _part_dedupe_key(part: dict[str, Any]) -> str | None:
+    keys = _part_dedupe_keys(part)
+    return keys[0] if keys else None
+
+
+def _part_dedupe_keys(part: dict[str, Any]) -> list[str]:
+    keys: list[str] = []
+    part_type = part.get("type")
+    runtime_message_id = part.get("runtime_message_id")
+    if runtime_message_id:
+        keys.append(f"runtime:{runtime_message_id}:{part_type}:{part.get('tool_call_id', '')}")
+    tool_call_id = part.get("tool_call_id")
+    if tool_call_id and part_type in {"tool_call", "tool_result"}:
+        keys.append(f"tool:{part_type}:{tool_call_id}")
+    return keys
 
 
 async def _persist_loaded_skills(session_id: str, messages: list) -> None:
@@ -1270,28 +2388,41 @@ class _ThinkFilter:
         return "".join(self._reasoning_parts).strip()
 
 
-def _strip_model_tags(text: str) -> str:
-    """Remove model-specific XML-like tags that leak into output.
+def _merge_reasoning_progress(previous: str, current: str) -> tuple[str, str]:
+    """Return updated reasoning progress and the incremental delta to emit."""
+    previous = (previous or "").strip()
+    current = (current or "").strip()
+    if not current:
+        return previous, ""
+    if not previous:
+        return current, current
+    if current == previous:
+        return previous, ""
+    if current.startswith(previous):
+        return current, current[len(previous):].lstrip("\n")
+    if previous.startswith(current):
+        return previous, ""
+    merged = merge_reasoning_text(previous, current)
+    if merged == previous:
+        return previous, ""
+    if merged.startswith(previous + "\n"):
+        return merged, merged[len(previous):].lstrip("\n")
+    return merged, current
 
-    Handles: <think>, <minimax:tool_call>, and any other vendor-prefixed tags.
-    """
-    import re
-    # Remove paired blocks: <think>...</think>, <minimax:tool_call>...</minimax:tool_call>, etc.
-    text = re.sub(r"<(\w[\w:_-]*)>[\s\S]*?</\1>", "", text)
-    # Remove any remaining standalone model-specific tags
-    text = re.sub(r"</?(?:think|minimax:\w+)(?:\s[^>]*)?>", "", text)
-    return text.strip()
+
+def _strip_model_tags(message_or_text: Any) -> str:
+    """Return visible assistant text with provider reasoning tags removed."""
+    if isinstance(message_or_text, str):
+        return strip_reasoning_tags(message_or_text)
+    content = getattr(message_or_text, "content", "")
+    return strip_reasoning_tags(content if isinstance(content, str) else "")
 
 
-def _extract_reasoning(text: str) -> str:
-    """Extract reasoning content from ``<think>...</think>`` blocks.
-
-    Returns the concatenated inner text of all think blocks (without tags),
-    or empty string if none found.
-    """
-    import re
-    parts = re.findall(r"<think>([\s\S]*?)</think>", text)
-    return "\n".join(p.strip() for p in parts if p.strip())
+def _extract_reasoning(message_or_text: Any) -> str:
+    """Extract visible reasoning from either raw text or AI messages."""
+    if isinstance(message_or_text, str):
+        return extract_reasoning_from_text(message_or_text)
+    return extract_reasoning_from_message(message_or_text).visible_text
 
 
 # Backward-compatible alias

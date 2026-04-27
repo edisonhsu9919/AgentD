@@ -58,6 +58,13 @@ class KnowledgeReadTool(BaseTool):
             "required": ["doc_id"],
         }
 
+    def canonicalize_args(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "doc_id": kwargs.get("doc_id"),
+            "offset": max(kwargs.get("offset") or 1, 1),
+            "limit": min(kwargs.get("limit") or 100, 500),
+        }
+
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
         from knowledge.store import read_knowledge_doc, list_knowledge_docs
 

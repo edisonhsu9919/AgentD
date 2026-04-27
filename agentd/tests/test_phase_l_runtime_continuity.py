@@ -39,7 +39,7 @@ class TestMigration011(unittest.TestCase):
 
     def test_expected_schema_version(self):
         from main import EXPECTED_SCHEMA_VERSION
-        assert EXPECTED_SCHEMA_VERSION == "014"
+        assert EXPECTED_SCHEMA_VERSION == "015"
 
     def test_agent_run_model_has_diagnostics(self):
         from agent.run_models import AgentRun
@@ -433,7 +433,7 @@ class TestMigration012(unittest.TestCase):
 
     def test_expected_schema_version(self):
         from main import EXPECTED_SCHEMA_VERSION
-        assert EXPECTED_SCHEMA_VERSION == "014"
+        assert EXPECTED_SCHEMA_VERSION == "015"
 
     def test_model_config_has_context_window(self):
         from model_config.models import ModelConfig
@@ -494,8 +494,8 @@ class TestContextWindowAPI(unittest.TestCase):
     def test_runtime_model_config_endpoint_returns_context_window(self):
         """Verify runtime endpoint source code includes context_window."""
         import inspect
-        from model_config.router import get_runtime_model_config
-        source = inspect.getsource(get_runtime_model_config)
+        from model_config.router import _build_runtime_model_config_payload
+        source = inspect.getsource(_build_runtime_model_config_payload)
         self.assertIn("context_window", source)
 
     def test_runtime_diagnostics_endpoint_returns_context_window(self):

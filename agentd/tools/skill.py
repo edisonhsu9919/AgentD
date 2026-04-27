@@ -78,6 +78,16 @@ class SkillTool(BaseTool):
             "required": ["action"],
         }
 
+    def canonicalize_args(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        action = kwargs.get("action") or "load"
+        name = self._normalize_skill_name(kwargs.get("name"))
+        if isinstance(name, str) and name.strip().lower() in {"", "null", "none"}:
+            name = None
+        return {
+            "action": action.strip() if isinstance(action, str) else action,
+            "name": name,
+        }
+
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
         action: str = kwargs["action"]
         skills_dir = get_skills_dir(ctx.user_root)

@@ -55,6 +55,13 @@ class KnowledgeSearchTool(BaseTool):
             "required": ["query"],
         }
 
+    def canonicalize_args(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        query = kwargs.get("query")
+        return {
+            "query": query.strip() if isinstance(query, str) else query,
+            "max_results": kwargs.get("max_results") or 10,
+        }
+
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
         from knowledge.store import list_knowledge_docs, read_knowledge_doc
 
