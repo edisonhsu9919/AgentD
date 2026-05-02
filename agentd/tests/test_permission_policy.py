@@ -414,5 +414,95 @@ class TestPolicyEndpoints:
         assert response.json()["data"]["mode"] == "manual"
 
 
+@pytest.mark.asyncio
+async def test_permission_resume_decisions_are_limited_to_current_hitl_batch(monkeypatch):
+    from permission import router as permission_router
+
+    session_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    permission_id = uuid.uuid4()
+    pr = MagicMock()
+    pr.id = permission_id
+    pr.session_id = session_id
+    pr.tool_call_id = "call_bash"
+    pr.tool_name = "bash"
+    pr.input = {"command": "pwd"}
+    pr.status = "pending"
+    session = MagicMock()
+    session.id = session_id
+    session.user_id = user_id
+    session.agent_id = "assistant"
+    session.model_id = "test-model"
+    current_user = MagicMock()
+    current_user.id = user_id
+    current_user.workspace = "/tmp/user"
+    db = AsyncMock()
+
+    monkeypatch.setattr(
+        permission_router.perm_svc,
+        "get_permission_request",
+        AsyncMock(return_value=pr),
+    )
+    monkeypatch.setattr(
+        permission_router.session_svc,
+        "get_session",
+        AsyncMock(return_value=session),
+    )
+    monkeypatch.setattr(
+        permission_router.perm_svc,
+        "resolve_permission",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        permission_router.perm_svc,
+        "count_pending_by_session",
+        AsyncMock(return_value=0),
+    )
+    monkeypatch.setattr(
+        permission_router,
+        "_current_open_hitl_tool_call_ids",
+        AsyncMock(return_value=["call_bash"]),
+    )
+    monkeypatch.setattr(
+        permission_router.perm_svc,
+        "get_resolved_by_tool_call_ids",
+        AsyncMock(return_value=[
+            MagicMock(status="approved", tool_call_id="call_bash"),
+        ]),
+    )
+    get_resolved_by_session = AsyncMock(return_value=[
+        MagicMock(status="denied", tool_call_id="historical_call"),
+    ])
+    monkeypatch.setattr(
+        permission_router.perm_svc,
+        "get_resolved_by_session",
+        get_resolved_by_session,
+    )
+    mark_batch = AsyncMock(return_value=1)
+    monkeypatch.setattr(
+        permission_router.perm_svc,
+        "mark_resolved_as_resumed_by_tool_call_ids",
+        mark_batch,
+    )
+    enqueue_resume = AsyncMock()
+    monkeypatch.setattr("agent.scheduler.enqueue_resume", enqueue_resume)
+    monkeypatch.setattr(permission_router.event_bus, "publish", AsyncMock())
+
+    await permission_router._resolve_and_maybe_resume(
+        db,
+        permission_id,
+        "approved",
+        current_user,
+    )
+
+    enqueue_resume.assert_awaited_once_with(
+        db,
+        session_id,
+        [{"type": "approve"}],
+    )
+    mark_batch.assert_not_awaited()
+    get_resolved_by_session.assert_not_awaited()
+
+
 # ── Need FastAPI TestClient import ──────────────────────────────────────────
 from fastapi.testclient import TestClient

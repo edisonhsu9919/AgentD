@@ -1,9 +1,16 @@
 import { create } from "zustand";
 import { apiFetch } from "@/lib/api";
+import {
+  appendTimelineReasoning,
+  appendTimelineText,
+  upsertTimelineToolResult,
+  upsertTimelineToolStart,
+} from "@/lib/streamingTimeline";
 import type {
   Message,
   SessionStatus,
   StreamingToolCall,
+  StreamingTimelineItem,
   SSEPermissionAsk,
   Runtime,
   SessionPolicy,
@@ -16,6 +23,8 @@ interface ChatState {
   streamingDraft: string;
   streamingThinking: string;
   streamingToolCalls: StreamingToolCall[];
+  streamingTimeline: StreamingTimelineItem[];
+  streamingTimelineSeq: number;
   pendingPermissions: SSEPermissionAsk[];
   status: SessionStatus;
   runtime: Runtime | null;
@@ -52,6 +61,7 @@ interface ChatState {
   addStreamingToolCall: (tc: StreamingToolCall) => void;
   updateStreamingToolResult: (
     toolCallId: string,
+    toolName: string,
     output: string,
     isError: boolean,
   ) => void;
@@ -72,6 +82,8 @@ export const useChatStore = create<ChatState>((set) => ({
   streamingDraft: "",
   streamingThinking: "",
   streamingToolCalls: [],
+  streamingTimeline: [],
+  streamingTimelineSeq: 0,
   pendingPermissions: [],
   status: "idle",
   runtime: null,
@@ -150,6 +162,8 @@ export const useChatStore = create<ChatState>((set) => ({
       streamingDraft: "",
       streamingThinking: "",
       streamingToolCalls: [],
+      streamingTimeline: [],
+      streamingTimelineSeq: 0,
       pendingPermissions: [],
       status: "idle",
     });
@@ -244,11 +258,33 @@ export const useChatStore = create<ChatState>((set) => ({
   },
 
   appendStreamingDraft: (text: string) => {
-    set((s) => ({ streamingDraft: s.streamingDraft + text }));
+    set((s) => {
+      const { timeline, nextSeq } = appendTimelineText(
+        s.streamingTimeline,
+        text,
+        s.streamingTimelineSeq,
+      );
+      return {
+        streamingDraft: s.streamingDraft + text,
+        streamingTimeline: timeline,
+        streamingTimelineSeq: nextSeq,
+      };
+    });
   },
 
   appendStreamingThinking: (text: string) => {
-    set((s) => ({ streamingThinking: s.streamingThinking + text }));
+    set((s) => {
+      const { timeline, nextSeq } = appendTimelineReasoning(
+        s.streamingTimeline,
+        text,
+        s.streamingTimelineSeq,
+      );
+      return {
+        streamingThinking: s.streamingThinking + text,
+        streamingTimeline: timeline,
+        streamingTimelineSeq: nextSeq,
+      };
+    });
   },
 
   addStreamingToolCall: (tc: StreamingToolCall) => {
@@ -257,18 +293,26 @@ export const useChatStore = create<ChatState>((set) => ({
       const exists = s.streamingToolCalls.some(
         (t) => t.tool_call_id === tc.tool_call_id,
       );
+      const { timeline, nextSeq } = upsertTimelineToolStart(
+        s.streamingTimeline,
+        tc,
+        s.streamingTimelineSeq,
+      );
       return {
         streamingToolCalls: exists
           ? s.streamingToolCalls.map((t) =>
               t.tool_call_id === tc.tool_call_id ? tc : t,
             )
           : [...s.streamingToolCalls, tc],
+        streamingTimeline: timeline,
+        streamingTimelineSeq: nextSeq,
       };
     });
   },
 
   updateStreamingToolResult: (
     toolCallId: string,
+    toolName: string,
     output: string,
     isError: boolean,
   ) => {
@@ -283,11 +327,36 @@ export const useChatStore = create<ChatState>((set) => ({
             }
           : tc,
       ),
+      ...(() => {
+        const existingTool = s.streamingToolCalls.find(
+          (tc) => tc.tool_call_id === toolCallId,
+        );
+        const { timeline, nextSeq } = upsertTimelineToolResult(
+          s.streamingTimeline,
+          {
+            tool_call_id: toolCallId,
+            tool_name: existingTool?.tool_name || toolName || "unknown_tool",
+            output,
+            is_error: isError,
+          },
+          s.streamingTimelineSeq,
+        );
+        return {
+          streamingTimeline: timeline,
+          streamingTimelineSeq: nextSeq,
+        };
+      })(),
     }));
   },
 
   clearStreaming: () => {
-    set({ streamingDraft: "", streamingThinking: "", streamingToolCalls: [] });
+    set({
+      streamingDraft: "",
+      streamingThinking: "",
+      streamingToolCalls: [],
+      streamingTimeline: [],
+      streamingTimelineSeq: 0,
+    });
   },
 
   setStatus: (status: SessionStatus) => {
@@ -328,6 +397,8 @@ export const useChatStore = create<ChatState>((set) => ({
       streamingDraft: "",
       streamingThinking: "",
       streamingToolCalls: [],
+      streamingTimeline: [],
+      streamingTimelineSeq: 0,
       pendingPermissions: [],
       status: "idle",
       runtime: null,

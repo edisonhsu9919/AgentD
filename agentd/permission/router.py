@@ -61,6 +61,28 @@ def _build_policy_rule(tool_name: str, tool_input: dict):
     return None
 
 
+async def _current_open_hitl_tool_call_ids(session, current_user: User) -> list[str]:
+    try:
+        from agent.executor import _extract_tool_call_ids
+        from agent.runtime import build_agent
+        from workspace.manager import get_session_dir
+
+        session_id = str(session.id)
+        session_dir = get_session_dir(current_user.workspace, session_id)
+        agent = await build_agent(
+            session_id=session_id,
+            user_id=str(session.user_id),
+            user_root=current_user.workspace,
+            session_dir=session_dir,
+            agent_id=session.agent_id,
+            model_id=session.model_id,
+        )
+        snapshot = await agent.aget_state({"configurable": {"thread_id": session_id}})
+        return _extract_tool_call_ids(snapshot) if snapshot else []
+    except Exception:
+        return []
+
+
 async def _resolve_and_maybe_resume(
     db: AsyncSession,
     permission_id: uuid.UUID,
@@ -130,8 +152,18 @@ async def _resolve_and_maybe_resume(
         # All resolved — build batch decisions and enqueue a resume run
         from agent.scheduler import enqueue_resume
 
-        # Query all recently resolved permissions for this session to build batch
-        all_resolved = await perm_svc.get_resolved_by_session(db, pr.session_id)
+        # Query only the current interrupt batch. Historical approved/denied
+        # rows must not leak into this resume Command.
+        current_tool_call_ids = await _current_open_hitl_tool_call_ids(session, current_user)
+        all_resolved = (
+            await perm_svc.get_resolved_by_tool_call_ids(
+                db,
+                pr.session_id,
+                current_tool_call_ids,
+            )
+            if current_tool_call_ids
+            else await perm_svc.get_resolved_by_session(db, pr.session_id)
+        )
         decisions_batch: list[dict] = []
         for rpr in all_resolved:
             if rpr.status == "approved":
@@ -150,10 +182,10 @@ async def _resolve_and_maybe_resume(
                 decisions_batch = [{"type": "reject", "message": "Permission denied by user"}]
 
         await enqueue_resume(db, pr.session_id, decisions_batch)
-
-        # Mark resolved permissions as "resumed" so they won't be
-        # double-counted if the session enters another interrupt cycle
-        await perm_svc.mark_resolved_as_resumed(db, pr.session_id)
+        # Do not mark permissions as resumed here. The resume worker owns
+        # consuming approved/denied HITL decisions after it has written the
+        # matching tool_result, so a failed worker cannot lose the evidence
+        # needed to close the tool-call group.
 
     # SINGLE atomic commit — resolves permission + enqueues resume (if applicable).
     # If this fails, everything rolls back: permission stays "pending", no orphaned state.

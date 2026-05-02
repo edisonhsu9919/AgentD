@@ -248,13 +248,13 @@ class TestToolLoopCircuitBreaker:
                 run_id,
                 session_id,
                 "continue",
-                {"mode": "retry_model_node"},
+                {"mode": "retry_model_node", "source_run_id": str(run_id)},
             )
 
         worker._execute_continue.assert_awaited_once_with(
             session_id,
             run_id,
-            {"mode": "retry_model_node"},
+            {"mode": "retry_model_node", "source_run_id": str(run_id)},
         )
 
 
@@ -297,6 +297,72 @@ class TestTranscriptIntegrity:
         interrupt_data = synthetic_snapshot.interrupts[0].value
         assert interrupt_data["tool_call_ids"] == ["call_write"]
         assert interrupt_data["action_requests"][0]["name"] == "file_write"
+
+    @pytest.mark.asyncio
+    async def test_standard_hitl_waiting_records_hitl_checkpoint_state(self, tmp_path):
+        from agent.executor import _handle_interrupt
+
+        session_id = str(uuid.uuid4())
+        snapshot = SimpleNamespace(
+            values={"messages": [
+                HumanMessage(content="write"),
+                AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "id": "call_write",
+                        "name": "file_write",
+                        "args": {"path": "x.txt", "content": "x"},
+                    }],
+                ),
+            ]},
+            interrupts=[SimpleNamespace(value={
+                "action_requests": [{
+                    "name": "file_write",
+                    "args": {"path": "x.txt", "content": "x"},
+                }],
+                "tool_call_ids": ["call_write"],
+            })],
+            next=("HumanInTheLoopMiddleware.after_model",),
+        )
+
+        captured = {}
+
+        async def fake_record(agent, session_id_arg, messages, *, snapshot=None):
+            from agent.diagnostics import build_checkpoint_diagnostics
+
+            captured.update(build_checkpoint_diagnostics(
+                messages=messages,
+                snapshot=snapshot,
+            ))
+
+        session_ctx = AsyncMock()
+        session_ctx.__aenter__.return_value = AsyncMock()
+        session_ctx.__aexit__.return_value = False
+
+        with (
+            patch("permission.policy.load_policy", return_value=SimpleNamespace(mode="manual")),
+            patch("agent.executor._persist_messages", new=AsyncMock()),
+            patch("agent.executor._record_run_diagnostics", new=fake_record),
+            patch("agent.executor.AsyncSessionLocal", return_value=session_ctx),
+            patch("agent.executor.perm_svc.get_or_create_permission_request", new=AsyncMock(
+                return_value=(SimpleNamespace(id=uuid.uuid4(), status="pending"), True),
+            )),
+            patch("agent.executor._update_db_status", new=AsyncMock()),
+        ):
+            needs_manual = await _handle_interrupt(
+                session_id,
+                str(tmp_path),
+                snapshot,
+                {"configurable": {"thread_id": session_id}},
+                AsyncMock(),
+                AsyncMock(),
+            )
+
+        assert needs_manual is True
+        assert captured["checkpoint_state_kind"] == "hitl_open_tool_call"
+        assert captured["requires_human_input"] is True
+        assert captured["is_provider_payload_ready"] is False
+        assert captured["checkpoint_valid"] is True
 
     @pytest.mark.asyncio
     async def test_unclosed_non_hitl_tool_call_refuses_terminal_idle(self):
@@ -378,6 +444,20 @@ class TestPermissionResumeIntegrity:
 
         assert diagnostics["transcript_integrity_error"] == "TRANSCRIPT_INTEGRITY_ERROR"
         assert diagnostics["transcript_integrity_issues"][0]["index"] == 1
+
+    def test_provider_payload_validation_diagnostics_keep_compat_fields(self):
+        from agent.executor import _get_transcript_integrity_diagnostics
+
+        agent = SimpleNamespace(_transcript_integrity_error={
+            "code": "PROVIDER_PAYLOAD_VALIDATION_ERROR",
+            "issues": [{"index": 1, "tool_call_id": "call_old"}],
+        })
+
+        diagnostics = _get_transcript_integrity_diagnostics(agent)
+
+        assert diagnostics["transcript_integrity_error"] == "PROVIDER_PAYLOAD_VALIDATION_ERROR"
+        assert diagnostics["provider_payload_validation_error"] is True
+        assert diagnostics["provider_payload_issues"][0]["tool_call_id"] == "call_old"
 
     def test_provider_timeout_after_tool_result_is_retryable(self):
         from agent.executor import _build_exception_diagnostics
@@ -530,12 +610,24 @@ class TestPermissionResumeIntegrity:
 
     @pytest.mark.asyncio
     async def test_error_prompt_enqueues_resume_instead_of_new_user_message(self):
+        from agent.checkpoint_state import classify_checkpoint
         from session.router import _OpenHitlRecovery, _recover_open_hitl_before_prompt
 
         session = SimpleNamespace(id=uuid.uuid4(), status="error")
         user = SimpleNamespace(id=uuid.uuid4(), workspace="/tmp/user")
         db = AsyncMock()
         run = SimpleNamespace(id=uuid.uuid4())
+        checkpoint_state = classify_checkpoint(
+            [
+                HumanMessage(content="write"),
+                AIMessage(
+                    content="",
+                    tool_calls=[{"id": "call_write", "name": "file_write", "args": {}}],
+                ),
+            ],
+            next_nodes=["HumanInTheLoopMiddleware.after_model"],
+            interrupts=[SimpleNamespace(value={"tool_call_ids": ["call_write"]})],
+        )
 
         with (
             patch(
@@ -543,6 +635,7 @@ class TestPermissionResumeIntegrity:
                 new=AsyncMock(return_value=_OpenHitlRecovery(
                     action="resume",
                     decisions=[{"type": "approve"}],
+                    checkpoint_state=checkpoint_state,
                 )),
             ),
             patch("agent.scheduler.enqueue_resume", new=AsyncMock(return_value=run)) as mock_enqueue,

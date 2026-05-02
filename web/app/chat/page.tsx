@@ -148,8 +148,9 @@ function ChatPageInner() {
       const runtime = await fetchRuntime(currentSessionId);
       if (cancelled) return;
 
-      // 3. If runtime says waiting, recover pending permissions
-      if (runtime && runtime.status === "waiting") {
+      // 3. If runtime explicitly says permission_waiting, recover pending permissions.
+      // Other waiting states (notably subtask_waiting) must not show permission recovery.
+      if (runtime && runtime.phase === "permission_waiting") {
         await fetchPendingPermissions(currentSessionId);
         if (cancelled) return;
       }
@@ -276,16 +277,16 @@ function ChatPageInner() {
                 />
               )}
 
-            {/* Waiting recovery: session is "waiting" but SSE permission_ask was missed.
+            {/* Waiting recovery: session is permission_waiting but SSE permission_ask was missed.
                 Only show after session enter completes (sessionReady) to avoid flashing
                 the banner while fetchPendingPermissions is still in-flight. */}
             {sessionReady &&
-              chatStatus === "waiting" &&
+              runtime?.phase === "permission_waiting" &&
               pendingPermissions.length === 0 && (
                 <WaitingRecoveryBanner sessionId={currentSessionId} />
               )}
 
-              {chatStatus === "subtask_waiting" && (
+              {(chatStatus === "subtask_waiting" || runtime?.phase === "subtask_waiting") && (
                 <div className="flex items-center gap-2 border-t border-purple-500/20 bg-purple-500/6 px-4 py-3">
                   <div className="h-2 w-2 animate-pulse rounded-full bg-purple-500" />
                   <span className="text-xs text-purple-500">

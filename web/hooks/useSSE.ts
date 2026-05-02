@@ -77,7 +77,7 @@ export function useSSE(sessionId: string | null) {
     }
   }, []);
 
-  /** Flush all remaining buffer to streamingDraft immediately */
+  /** Flush all remaining buffer to the ordered streaming timeline immediately */
   const flushBuffer = useCallback(() => {
     stopTypingLoop();
     if (bufferRef.current.length > 0) {
@@ -136,10 +136,14 @@ export function useSSE(sessionId: string | null) {
           break;
 
         case "reasoning_delta":
+          // Preserve SSE order: any pending text belongs before this reasoning item.
+          flushBuffer();
           appendStreamingThinking(event.content);
           break;
 
         case "tool_start":
+          // Preserve SSE order: buffered text before a tool must render above it.
+          flushBuffer();
           addStreamingToolCall({
             tool_call_id: event.tool_call_id,
             tool_name: event.tool_name,
@@ -149,8 +153,12 @@ export function useSSE(sessionId: string | null) {
           break;
 
         case "tool_result":
+          // A result updates its original tool item, but pending text still needs
+          // to land before this event so the live timeline never crosses streams.
+          flushBuffer();
           updateStreamingToolResult(
             event.tool_call_id,
+            event.tool_name,
             event.output,
             event.is_error,
           );
@@ -375,11 +383,17 @@ export function useSSE(sessionId: string | null) {
       fetchSessions();
       fetchTree(sessionId);
       fetchTaskPlan(sessionId);
-    } else if (runtime.status === "waiting") {
+    } else if (runtime.phase === "permission_waiting") {
       const { fetchPendingPermissions } = useChatStore.getState();
       await fetchPendingPermissions(sessionId);
       if (stalled) {
         fetchMessages(sessionId);
+        fetchTaskPlan(sessionId);
+      }
+    } else if (runtime.status === "waiting" || runtime.phase === "subtask_waiting") {
+      if (stalled) {
+        fetchMessages(sessionId);
+        fetchTasksFromAPI(sessionId);
         fetchTaskPlan(sessionId);
       }
     } else if (

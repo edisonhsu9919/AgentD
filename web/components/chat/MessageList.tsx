@@ -8,7 +8,7 @@ import SummaryDivider from "./SummaryDivider";
 import ToolCallBlock from "./ToolCallBlock";
 import MessageMarkdown from "./MessageMarkdown";
 import { ArrowDown, Loader2, Clock, ChevronRight, Wrench } from "lucide-react";
-import type { Message } from "@/lib/types";
+import type { Message, SessionStatus, StreamingTimelineItem } from "@/lib/types";
 
 /**
  * Parse streaming content into thinking vs formal text.
@@ -150,9 +150,7 @@ function TranscriptRow({
 
 export default function MessageList() {
   const messages = useChatStore((s) => s.messages);
-  const streamingDraft = useChatStore((s) => s.streamingDraft);
-  const streamingThinking = useChatStore((s) => s.streamingThinking);
-  const streamingToolCalls = useChatStore((s) => s.streamingToolCalls);
+  const streamingTimeline = useChatStore((s) => s.streamingTimeline);
   const status = useChatStore((s) => s.status);
   const plan = useTaskPlanStore((s) => s.plan);
 
@@ -201,6 +199,11 @@ export default function MessageList() {
     }
   }, [activeSessionId, messages.length]);
 
+  const latestStreamingTick = useMemo(() => {
+    const last = streamingTimeline.at(-1);
+    return last?.updatedAt ?? 0;
+  }, [streamingTimeline]);
+
   useEffect(() => {
     if (isNearBottomRef.current) {
       scrollViewportToBottom("smooth");
@@ -208,7 +211,7 @@ export default function MessageList() {
     }
     const timer = window.setTimeout(() => setShowJumpToBottom(true), 0);
     return () => window.clearTimeout(timer);
-  }, [streamingDraft, streamingThinking, streamingToolCalls.length, status]);
+  }, [streamingTimeline.length, latestStreamingTick, status]);
 
   // Build cross-message tool_call_id → {tool_name, input} map so tool_result parts
   // in ToolMessages (role: "tool") can resolve their tool identity from the matching
@@ -262,41 +265,13 @@ export default function MessageList() {
     return map;
   }, [messages, toolInfoMap]);
 
-  // Parse <think> tags from streamingDraft (defense-in-depth if backend filter leaks)
-  const parsed = streamingDraft
-    ? parseStreamingThinking(streamingDraft)
-    : { isThinking: false, thinkingText: "", formalText: "" };
-
-  // Merge thinking from both sources:
-  // 1. streamingThinking — from reasoning_delta SSE events
-  // 2. parsed.thinkingText — from <think> tags in text_delta (fallback)
-  const thinkingContent = [streamingThinking, parsed.thinkingText]
-    .filter(Boolean)
-    .join("\n");
-
-  const hasRunningTool = streamingToolCalls.some(
-    (tc) => tc.status === "running",
+  const hasRunningTool = streamingTimeline.some(
+    (item) => item.kind === "tool" && item.status === "running",
   );
-  const hasThinkingContent = !!thinkingContent;
 
-  // Active thinking: content arriving without formal text,
-  // or gap detection (running, no output, no running tool)
-  const isActivelyThinking =
-    (hasThinkingContent && !parsed.formalText) ||
-    parsed.isThinking ||
-    (status === "running" &&
-      !streamingDraft &&
-      !streamingThinking &&
-      !hasRunningTool);
-
-  const showThinking = isActivelyThinking || hasThinkingContent;
-  const formalText = parsed.formalText;
-
-  // Show streaming bubble when: has content OR agent is running
+  // Show streaming row when: has ordered content OR agent is running/queued.
   const hasStreaming =
-    streamingDraft ||
-    streamingThinking ||
-    streamingToolCalls.length > 0 ||
+    streamingTimeline.length > 0 ||
     status === "running";
 
   const renderedRows = useMemo(() => {
@@ -373,17 +348,19 @@ export default function MessageList() {
           className={`mx-auto flex w-full max-w-[1080px] flex-col gap-3 pb-4 pt-2 ${hasTaskPlan ? "pt-24 md:pt-28" : ""}`}
         >
       {/* Persisted messages — tool-only runs collapse only after a later conclusion appears */}
-      {renderedRows.map((row) => {
+      {renderedRows.map((row, rowIndex) => {
+        const rowKey = `${row.key || row.type}-${rowIndex}`;
+
         if (row.type === "summary") {
-          return <SummaryDivider key={row.key} message={row.message} />;
+          return <SummaryDivider key={rowKey} message={row.message} />;
         }
 
         if (row.type === "tool-group") {
           return (
-            <CollapsedToolHistoryGroup key={row.key} toolCount={row.toolCount}>
-              {row.messages.map((message) => (
+            <CollapsedToolHistoryGroup key={rowKey} toolCount={row.toolCount}>
+              {row.messages.map((message, messageIndex) => (
                 <MessageBubble
-                  key={message.id}
+                  key={`${message.id || message.seq || "message"}-${messageIndex}`}
                   message={message}
                   toolInfoMap={toolInfoMap}
                   knowledgeSources={knowledgeSourcesMap.get(message.id)}
@@ -395,7 +372,7 @@ export default function MessageList() {
 
         return (
           <MessageBubble
-            key={row.key}
+            key={rowKey}
             message={row.message}
             toolInfoMap={toolInfoMap}
             knowledgeSources={knowledgeSourcesMap.get(row.message.id)}
@@ -435,33 +412,18 @@ export default function MessageList() {
               </div>
             )}
 
-            {/* Thinking block — from reasoning_delta, <think> tags, or gap detection */}
-            {showThinking && (
-              <ThinkingBlock
-                isActive={isActivelyThinking}
-                content={thinkingContent}
-              />
+            {streamingTimeline.length === 0 && status === "running" && !hasRunningTool && (
+              <ThinkingBlock isActive content="" />
             )}
 
-            {/* Streaming tool calls */}
-            {streamingToolCalls.map((tc) => (
-              <ToolCallBlock
-                key={tc.tool_call_id}
-                toolName={tc.tool_name}
-                input={tc.input}
-                output={tc.output}
-                isError={tc.is_error}
-                status={tc.status}
-                autoCollapseOnComplete={false}
+            {streamingTimeline.map((item, index) => (
+              <StreamingTimelineBlock
+                key={item.kind === "tool" ? `stream-tool:${item.tool_call_id}` : item.id}
+                item={item}
+                isLast={index === streamingTimeline.length - 1}
+                status={status}
               />
             ))}
-
-            {/* Formal text (after thinking) */}
-            {formalText && (
-              <div className="chat-prose">
-                <MessageMarkdown>{formalText}</MessageMarkdown>
-              </div>
-            )}
 
             {/* Typing cursor — shown when running and no tool is actively executing */}
             {status === "running" && !hasRunningTool && (
@@ -500,6 +462,55 @@ function RunningBars() {
           style={{ animationDelay: `${index * 0.14}s` }}
         />
       ))}
+    </div>
+  );
+}
+
+function StreamingTimelineBlock({
+  item,
+  isLast,
+  status,
+}: {
+  item: StreamingTimelineItem;
+  isLast: boolean;
+  status: SessionStatus;
+}) {
+  if (item.kind === "reasoning") {
+    return (
+      <ThinkingBlock
+        isActive={status === "running" && isLast}
+        content={item.content}
+      />
+    );
+  }
+
+  if (item.kind === "tool") {
+    return (
+      <ToolCallBlock
+        toolName={item.tool_name}
+        input={item.input}
+        output={item.output}
+        isError={item.is_error}
+        status={item.status}
+        autoCollapseOnComplete={false}
+      />
+    );
+  }
+
+  const parsed = parseStreamingThinking(item.content);
+  return (
+    <div className="space-y-2">
+      {(parsed.thinkingText || parsed.isThinking) && (
+        <ThinkingBlock
+          isActive={status === "running" && isLast && parsed.isThinking}
+          content={parsed.thinkingText}
+        />
+      )}
+      {parsed.formalText && (
+        <div className="chat-prose">
+          <MessageMarkdown>{parsed.formalText}</MessageMarkdown>
+        </div>
+      )}
     </div>
   );
 }

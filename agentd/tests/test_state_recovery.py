@@ -290,6 +290,64 @@ class TestRuntimeEndpoint:
         data = response.json()["data"]
         assert data["last_error"] == "subtask continuation failed"
 
+    def test_runtime_ignores_stale_gate_after_projection_repair(self, setup):
+        session, user, sid = setup
+        from api.deps import get_current_user
+        from core.database import get_db
+        from main import app
+
+        db = AsyncMock()
+        diag_run = MagicMock()
+        diag_run.diagnostics = {
+            "runtime_integrity_gate": {
+                "action": "fail_integrity_error",
+                "reason": "db_tail_open_tool_call:assistant_tool_call_missing_tool_result",
+                "open_tool_call_ids": ["call_stale"],
+                "can_accept_user_prompt": False,
+                "requires_human_input": False,
+            },
+            "projection_repair": {
+                "repaired": True,
+                "reason": "db_projection_ahead_of_checkpoint",
+            },
+            "provider_error_category": "runtime_projection_repaired",
+        }
+        failed_run = MagicMock()
+        failed_run.status = "failed"
+        failed_run.error = "RuntimeIntegrityError: stale projection"
+        failed_run.diagnostics = diag_run.diagnostics
+        count_result = MagicMock()
+        count_result.scalar_one.return_value = 0
+        db.execute = AsyncMock(side_effect=[
+            MagicMock(scalar_one_or_none=MagicMock(return_value=diag_run)),
+            MagicMock(scalar_one_or_none=MagicMock(return_value=failed_run)),
+            count_result,
+        ])
+
+        async def override_get_db():
+            return db
+
+        app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_current_user] = lambda: user
+
+        with (
+            patch("session.router.session_svc") as mock_session_svc,
+            patch("permission.service.count_pending_by_session", new_callable=AsyncMock, return_value=0),
+            patch("session.router._load_checkpoint_state", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_session_svc.get_session = AsyncMock(return_value=session)
+            mock_session_svc.get_last_message_seq = AsyncMock(return_value=5)
+            client = TestClient(app)
+            response = client.get(f"/api/sessions/{sid}/runtime")
+
+        app.dependency_overrides.clear()
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["can_accept_user_prompt"] is True
+        assert data["open_tool_call_ids"] == []
+        assert data["requires_human_input"] is False
+
 
 class TestPendingPermissionsEndpoint:
     """Test GET /api/sessions/{id}/permissions/pending."""

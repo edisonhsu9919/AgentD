@@ -87,6 +87,15 @@ class RuntimeResponse(BaseModel):
     last_call_completion_tokens: int = 0
     context_window_limit: Optional[int] = None
     context_usage_ratio: Optional[float] = None
+    # Phase v0.4.4 / B: narrow retry/continue recovery truth for UI.
+    retryable_model_continuation: bool = False
+    retry_kind: Optional[str] = None
+    provider_error_category: Optional[str] = None
+    checkpoint_state_kind: Optional[str] = None
+    runtime_state: Optional[str] = None
+    can_accept_user_prompt: bool = True
+    open_tool_call_ids: list[str] = []
+    requires_human_input: bool = False
     # Phase N1: compaction state
     last_compaction_at: Optional[datetime] = None
     compaction_count: int = 0

@@ -24,6 +24,13 @@ from langchain_openai.chat_models.base import (
     _lc_tool_call_to_openai_tool_call,
 )
 
+from agent.provider_payload_validator import (
+    ProviderPayloadValidationError,
+    assert_provider_payload_valid,
+    find_provider_tool_adjacency_issues,
+    sanitize_provider_tool_adjacency,
+)
+
 
 _REASONING_KEYS = (
     "reasoning_content",
@@ -39,16 +46,9 @@ _PROVIDER_CONTINUATION_KEYS = {
 }
 
 
-class TranscriptIntegrityError(RuntimeError):
-    """Raised when provider payload would violate tool-call adjacency."""
-
-    def __init__(self, issues: list[dict[str, Any]]):
-        self.code = "TRANSCRIPT_INTEGRITY_ERROR"
-        self.issues = issues
-        super().__init__(
-            "TRANSCRIPT_INTEGRITY_ERROR: provider payload has invalid "
-            f"tool-call adjacency: {issues}"
-        )
+# Backward-compatible import name for v0.4.3 call sites. New provider request
+# preflight failures should be categorized as provider_payload_validation_error.
+TranscriptIntegrityError = ProviderPayloadValidationError
 
 
 @dataclass(frozen=True)
@@ -164,7 +164,11 @@ class ProviderAwareChatOpenAI(ChatOpenAI):
         ]
         if self.strict_provider_compat_fallback:
             message_dicts = _sanitize_provider_tool_adjacency(message_dicts)
-        _assert_provider_tool_adjacency(message_dicts)
+        _assert_provider_tool_adjacency(
+            message_dicts,
+            provider_family=self.provider_family,
+            model_id=getattr(self, "model_name", None),
+        )
         return {
             "messages": message_dicts,
             **self._default_params,
@@ -186,112 +190,27 @@ def merge_reasoning_text(*parts: str) -> str:
 
 def _sanitize_provider_tool_adjacency(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop runtime-corrupt tool-call groups before provider submission."""
-    sanitized: list[dict[str, Any]] = []
-    i = 0
-    while i < len(messages):
-        message = messages[i]
-        if message.get("role") == "assistant" and message.get("tool_calls"):
-            required_ids = [
-                tool_call.get("id")
-                for tool_call in message.get("tool_calls", [])
-                if tool_call.get("id")
-            ]
-            j = i + 1
-            tool_messages: list[dict[str, Any]] = []
-            tool_ids: list[str | None] = []
-            while j < len(messages) and messages[j].get("role") == "tool":
-                tool_messages.append(messages[j])
-                tool_ids.append(messages[j].get("tool_call_id"))
-                j += 1
-
-            valid = (
-                len(tool_ids) >= len(required_ids)
-                and all(tool_call_id in tool_ids for tool_call_id in required_ids)
-                and all(tool_call_id in required_ids for tool_call_id in tool_ids)
-            )
-            if valid:
-                sanitized.append(message)
-                sanitized.extend(tool_messages)
-            i = max(j, i + 1)
-            continue
-
-        if message.get("role") == "tool":
-            i += 1
-            continue
-
-        sanitized.append(message)
-        i += 1
-
-    return sanitized
+    return sanitize_provider_tool_adjacency(messages)
 
 
-def _assert_provider_tool_adjacency(messages: list[dict[str, Any]]) -> None:
-    issues = _find_provider_tool_adjacency_issues(messages)
-    if issues:
-        raise TranscriptIntegrityError(issues)
+def _assert_provider_tool_adjacency(
+    messages: list[dict[str, Any]],
+    *,
+    provider_family: str = "openai_compatible",
+    model_id: str | None = None,
+) -> None:
+    assert_provider_payload_valid(
+        messages,
+        provider_family=provider_family,
+        model_id=model_id,
+    )
 
 
 def _find_provider_tool_adjacency_issues(
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Find OpenAI-compatible tool-call adjacency violations in payload dicts."""
-    issues: list[dict[str, Any]] = []
-    i = 0
-    while i < len(messages):
-        message = messages[i]
-        role = message.get("role")
-        if role == "assistant" and message.get("tool_calls"):
-            required_ids = [
-                tool_call.get("id")
-                for tool_call in message.get("tool_calls", [])
-                if tool_call.get("id")
-            ]
-            j = i + 1
-            tool_indices: list[int] = []
-            tool_ids: list[str | None] = []
-            while j < len(messages) and messages[j].get("role") == "tool":
-                tool_indices.append(j)
-                tool_ids.append(messages[j].get("tool_call_id"))
-                j += 1
-
-            missing_ids = [
-                tool_call_id
-                for tool_call_id in required_ids
-                if tool_call_id not in tool_ids
-            ]
-            extra_ids = [
-                tool_call_id
-                for tool_call_id in tool_ids
-                if tool_call_id not in required_ids
-            ]
-            if (
-                len(tool_ids) < len(required_ids)
-                or missing_ids
-                or extra_ids
-            ):
-                issues.append({
-                    "index": i,
-                    "role": "assistant",
-                    "tool_call_ids": required_ids,
-                    "following_tool_indices": tool_indices,
-                    "following_tool_call_ids": tool_ids,
-                    "missing_tool_call_ids": missing_ids,
-                    "extra_tool_call_ids": extra_ids,
-                })
-            i = max(j, i + 1)
-            continue
-
-        if role == "tool":
-            issues.append({
-                "index": i,
-                "role": "tool",
-                "tool_call_id": message.get("tool_call_id"),
-                "reason": "orphan_tool_message",
-            })
-
-        i += 1
-
-    return issues
+    return find_provider_tool_adjacency_issues(messages)
 
 
 def append_provider_state_delta(

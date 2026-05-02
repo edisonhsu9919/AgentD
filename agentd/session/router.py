@@ -34,6 +34,7 @@ class _OpenHitlRecovery:
     action: str
     decisions: list[dict] | None = None
     reason: str = ""
+    checkpoint_state: object | None = None
 
 
 # ── Session endpoints ────────────────────────────────────────────────────────
@@ -190,14 +191,19 @@ def _error_looks_like_provider_timeout(error: Optional[str]) -> bool:
     return bool(error and "timeout" in error.lower())
 
 
-async def _checkpoint_allows_model_retry(session, current_user: User) -> bool:
+def _diagnostics_projection_repaired(diagnostics: Optional[dict]) -> bool:
+    if not isinstance(diagnostics, dict):
+        return False
+    if diagnostics.get("provider_error_category") == "runtime_projection_repaired":
+        return True
+    repair = diagnostics.get("projection_repair")
+    return bool(isinstance(repair, dict) and repair.get("repaired") is True)
+
+
+async def _load_checkpoint_state(session, current_user: User):
     try:
-        from agent.executor import (
-            _checkpoint_tool_adjacency_is_valid,
-            _snapshot_next_contains_model,
-        )
+        from agent.checkpoint_state import classify_checkpoint_snapshot
         from agent.runtime import build_agent
-        from langchain_core.messages import ToolMessage
         from workspace.manager import get_session_dir
 
         session_id = str(session.id)
@@ -211,16 +217,58 @@ async def _checkpoint_allows_model_retry(session, current_user: User) -> bool:
             model_id=session.model_id,
         )
         snapshot = await agent.aget_state({"configurable": {"thread_id": session_id}})
-        messages = (snapshot.values or {}).get("messages", []) if snapshot else []
-        if not snapshot or not _snapshot_next_contains_model(snapshot):
-            return False
-        if getattr(snapshot, "interrupts", None):
-            return False
-        if not messages or not isinstance(messages[-1], ToolMessage):
-            return False
-        return _checkpoint_tool_adjacency_is_valid(messages)
+        return classify_checkpoint_snapshot(snapshot)
+    except Exception:
+        return None
+
+
+async def _checkpoint_allows_model_retry(session, current_user: User) -> bool:
+    try:
+        from agent.recovery_policy import RecoveryPolicy
+
+        state = await _load_checkpoint_state(session, current_user)
+        return bool(state and RecoveryPolicy._checkpoint_allows_continue(state))
     except Exception:
         return False
+
+
+def _hitl_permission_state_from_recovery(recovery: _OpenHitlRecovery) -> str | None:
+    if recovery.action == "waiting":
+        return "pending"
+    if recovery.action == "resume" and recovery.decisions:
+        return "resolved"
+    return None
+
+
+def _build_recovery_input(
+    *,
+    session,
+    checkpoint_state=None,
+    failed_run=None,
+    hitl_recovery: _OpenHitlRecovery | None = None,
+):
+    from agent.recovery_policy import RecoveryPolicyInput
+
+    diagnostics = getattr(failed_run, "diagnostics", None) if failed_run else None
+    provider_error_category = (
+        diagnostics.get("provider_error_category")
+        if isinstance(diagnostics, dict)
+        else None
+    )
+    return RecoveryPolicyInput(
+        session_status=getattr(session, "status", None),
+        failed_run_status=getattr(failed_run, "status", None) if failed_run else None,
+        failed_run_error=getattr(failed_run, "error", None) if failed_run else None,
+        diagnostics=diagnostics,
+        checkpoint_state=checkpoint_state,
+        provider_error_category=provider_error_category,
+        hitl_permission_state=(
+            _hitl_permission_state_from_recovery(hitl_recovery)
+            if hitl_recovery is not None
+            else None
+        ),
+        source_run_id=str(failed_run.id) if failed_run is not None else None,
+    )
 
 
 async def _inspect_open_hitl_recovery(
@@ -230,6 +278,7 @@ async def _inspect_open_hitl_recovery(
 ) -> _OpenHitlRecovery:
     """Detect an error-state session that still needs checkpoint resume."""
     try:
+        from agent.checkpoint_state import classify_checkpoint_snapshot
         from agent.executor import _extract_tool_call_ids, _snapshot_is_open_hitl_interrupt
         from agent.runtime import build_agent
         from permission import service as perm_svc
@@ -248,10 +297,15 @@ async def _inspect_open_hitl_recovery(
         snapshot = await agent.aget_state({"configurable": {"thread_id": session_id}})
         if not _snapshot_is_open_hitl_interrupt(snapshot):
             return _OpenHitlRecovery(action="none")
+        checkpoint_state = classify_checkpoint_snapshot(snapshot)
 
         tool_call_ids = _extract_tool_call_ids(snapshot)
         if not tool_call_ids:
-            return _OpenHitlRecovery(action="blocked", reason="missing_tool_call_ids")
+            return _OpenHitlRecovery(
+                action="blocked",
+                reason="missing_tool_call_ids",
+                checkpoint_state=checkpoint_state,
+            )
 
         permissions = []
         for tool_call_id in tool_call_ids:
@@ -262,11 +316,19 @@ async def _inspect_open_hitl_recovery(
                 statuses=["pending", "approved", "denied", "resumed", "auto_approved"],
             )
             if pr is None:
-                return _OpenHitlRecovery(action="blocked", reason="missing_permission")
+                return _OpenHitlRecovery(
+                    action="blocked",
+                    reason="missing_permission",
+                    checkpoint_state=checkpoint_state,
+                )
             permissions.append(pr)
 
         if any(pr.status == "pending" for pr in permissions):
-            return _OpenHitlRecovery(action="waiting", reason="pending_permission")
+            return _OpenHitlRecovery(
+                action="waiting",
+                reason="pending_permission",
+                checkpoint_state=checkpoint_state,
+            )
 
         decisions: list[dict] = []
         for pr in permissions:
@@ -281,9 +343,14 @@ async def _inspect_open_hitl_recovery(
                 return _OpenHitlRecovery(
                     action="blocked",
                     reason=f"unsupported_permission_status:{pr.status}",
+                    checkpoint_state=checkpoint_state,
                 )
 
-        return _OpenHitlRecovery(action="resume", decisions=decisions)
+        return _OpenHitlRecovery(
+            action="resume",
+            decisions=decisions,
+            checkpoint_state=checkpoint_state,
+        )
     except Exception:
         return _OpenHitlRecovery(action="none")
 
@@ -301,7 +368,16 @@ async def _recover_open_hitl_before_prompt(
     if recovery.action == "none":
         return None
 
-    if recovery.action == "waiting":
+    from agent.recovery_policy import RecoveryDecisionKind, RecoveryPolicy
+
+    checkpoint_state = recovery.checkpoint_state or await _load_checkpoint_state(session, current_user)
+    decision = RecoveryPolicy.decide(_build_recovery_input(
+        session=session,
+        checkpoint_state=checkpoint_state,
+        hitl_recovery=recovery,
+    ))
+
+    if decision.kind == RecoveryDecisionKind.WAITING_PERMISSION:
         await session_svc.update_session_status(db, session.id, "waiting")
         await db.commit()
         raise HTTPException(
@@ -312,7 +388,7 @@ async def _recover_open_hitl_before_prompt(
             },
         )
 
-    if recovery.action != "resume" or not recovery.decisions:
+    if decision.kind != RecoveryDecisionKind.RESUME_OPEN_HITL or not recovery.decisions:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -322,6 +398,7 @@ async def _recover_open_hitl_before_prompt(
                     "and cannot accept a new user message yet"
                 ),
                 "reason": recovery.reason,
+                "policy_reason": decision.reason,
             },
         )
 
@@ -338,6 +415,136 @@ async def _recover_open_hitl_before_prompt(
         "recovered": True,
         "mode": "resume_open_hitl",
     }
+
+
+async def _enforce_prompt_runtime_integrity_gate(
+    db: AsyncSession,
+    session,
+    current_user: User,
+) -> None:
+    from agent.runtime_integrity import (
+        RuntimeIntegrityGate,
+        RuntimeIntegrityInput,
+        load_terminal_validation_messages,
+    )
+    from permission import service as perm_svc
+
+    session_status = await _normalize_prompt_ingress_session_state(db, session)
+    checkpoint_state = await _load_checkpoint_state(session, current_user)
+    try:
+        from agent.projection_consistency import (
+            inspect_db_checkpoint_projection,
+            load_checkpoint_messages,
+            mark_latest_failed_run_projection_recoverable,
+            repair_db_projection_ahead,
+        )
+
+        checkpoint_messages = await load_checkpoint_messages(
+            session,
+            current_user=current_user,
+        )
+        projection = await inspect_db_checkpoint_projection(
+            db,
+            session.id,
+            checkpoint_messages,
+        )
+        if projection.is_db_projection_ahead:
+            repair = await repair_db_projection_ahead(db, projection)
+            if repair.repaired:
+                await mark_latest_failed_run_projection_recoverable(
+                    db,
+                    session.id,
+                    projection,
+                    repair,
+                )
+            await db.flush()
+    except Exception:
+        logger.exception("Failed to run prompt ingress projection repair")
+    validation = await load_terminal_validation_messages(
+        db,
+        session.id,
+        run_start_seq=None,
+    )
+    pending_permissions = await perm_svc.get_pending_by_session(db, session.id)
+    decision = RuntimeIntegrityGate.decide_prompt_ingress(RuntimeIntegrityInput(
+        session_id=str(session.id),
+        session_status=session_status,
+        checkpoint_state=checkpoint_state,
+        db_tail_messages=validation.messages,
+        pending_permissions=pending_permissions,
+        validation_scope=validation.scope,
+        run_end_seq=validation.end_seq,
+        expanded_from_seq=validation.expanded_from_seq,
+    ))
+
+    if decision.can_accept_user_prompt:
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "SESSION_HAS_OPEN_RUNTIME_STATE",
+            "message": (
+                "Session has an unresolved tool call or runtime continuation; "
+                "resolve or retry before sending a new message."
+            ),
+            "runtime_state": decision.checkpoint_state_kind,
+            "reason": decision.reason,
+            "open_tool_call_ids": decision.open_tool_call_ids,
+            "requires_human_input": decision.requires_human_input,
+            "can_accept_user_prompt": False,
+        },
+    )
+
+
+async def _normalize_prompt_ingress_session_state(db: AsyncSession, session) -> str | None:
+    """Repair stale parent child-task state before prompt-ingress gating."""
+    status_value = getattr(session, "status", None)
+
+    try:
+        from agent.subtask_reconciliation import reconcile_completed_child_tasks
+        from agent.subtask_bridge import bridge_reconcilable_child_tasks
+
+        active_child_task = await _active_blocking_child_task_id(db, session.id)
+        if active_child_task is not None or status_value == "subtask_waiting":
+            bridge_result = await bridge_reconcilable_child_tasks(
+                parent_session_id=session.id,
+            )
+            if bridge_result.enqueued_run_id:
+                setattr(session, "status", "queued")
+                return "subtask_waiting"
+            await reconcile_completed_child_tasks(db, session.id)
+            active_child_task = await _active_blocking_child_task_id(db, session.id)
+
+        if active_child_task is not None:
+            if status_value != "subtask_waiting":
+                await session_svc.update_session_status(db, session.id, "subtask_waiting")
+                setattr(session, "status", "subtask_waiting")
+            return "subtask_waiting"
+
+        if status_value == "subtask_waiting":
+            await session_svc.update_session_status(db, session.id, "idle")
+            setattr(session, "status", "idle")
+            return "idle"
+        return status_value
+    except Exception:
+        return status_value
+
+
+async def _active_blocking_child_task_id(db: AsyncSession, session_id: uuid.UUID):
+    from sqlalchemy import select as sa_select
+    from agent.task_models import SessionTask
+
+    return (
+        await db.execute(
+            sa_select(SessionTask.id)
+            .where(SessionTask.session_id == session_id)
+            .where(SessionTask.task_kind == "child_session")
+            .where(SessionTask.blocking_mode == "blocking")
+            .where(SessionTask.status.in_(["queued", "running", "waiting"]))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
 
 
 # ── Message endpoints ────────────────────────────────────────────────────────
@@ -357,7 +564,18 @@ async def list_messages(
             detail={"code": "NOT_FOUND", "message": "Session not found"},
         )
     messages = await session_svc.list_messages(db, session_id)
-    data = [MessageResponse.model_validate(m).model_dump(mode="json") for m in messages]
+    data = []
+    for message in messages:
+        item = MessageResponse.model_validate(message).model_dump(mode="json")
+        item["parts"] = [
+            part for part in item.get("parts", [])
+            if not (
+                isinstance(part, dict)
+                and part.get("projection_state") == "discarded"
+            )
+        ]
+        if item["parts"] or item.get("is_summary"):
+            data.append(item)
     return ok_list(data, total=len(data))
 
 
@@ -409,7 +627,15 @@ async def get_runtime(
     ctx_ratio = None
     last_error = None
     retryable_model_continuation = False
+    retry_kind = None
+    provider_error_category = None
+    checkpoint_state_kind = None
+    runtime_state = None
+    can_accept_user_prompt = session.status not in {"queued", "running", "waiting", "subtask_waiting"}
+    open_tool_call_ids: list[str] = []
+    requires_human_input = False
     try:
+        from agent.recovery_policy import RecoveryDecisionKind, RecoveryPolicy
         from agent.run_models import AgentRun
         from sqlalchemy import select as sa_select
 
@@ -427,6 +653,23 @@ async def get_runtime(
             ctx_completion = diag.get("last_call_completion_tokens", 0)
             ctx_window = diag.get("context_window_limit")
             ctx_ratio = diag.get("context_usage_ratio")
+            gate = diag.get("runtime_integrity_gate")
+            projection_repaired = _diagnostics_projection_repaired(diag)
+            if projection_repaired:
+                runtime_state = gate.get("checkpoint_state_kind") if isinstance(gate, dict) else runtime_state
+                can_accept_user_prompt = session.status not in {
+                    "queued",
+                    "running",
+                    "waiting",
+                    "subtask_waiting",
+                }
+                open_tool_call_ids = []
+                requires_human_input = False
+            elif isinstance(gate, dict):
+                runtime_state = gate.get("checkpoint_state_kind")
+                can_accept_user_prompt = bool(gate.get("can_accept_user_prompt", can_accept_user_prompt))
+                open_tool_call_ids = list(gate.get("open_tool_call_ids") or [])
+                requires_human_input = bool(gate.get("requires_human_input", False))
 
         err_stmt = (
             sa_select(AgentRun)
@@ -438,17 +681,20 @@ async def get_runtime(
         last_error_run = (await db.execute(err_stmt)).scalar_one_or_none()
         if last_error_run and last_error_run.error:
             last_error = last_error_run.error
-            retryable_model_continuation = _diagnostics_allow_model_retry(
-                last_error_run.diagnostics,
+            checkpoint_state = await _load_checkpoint_state(session, current_user)
+            decision = RecoveryPolicy.decide(_build_recovery_input(
+                session=session,
+                checkpoint_state=checkpoint_state,
+                failed_run=last_error_run,
+            ))
+            retryable_model_continuation = (
+                decision.kind == RecoveryDecisionKind.CONTINUE_MODEL
+                and decision.allowed
             )
-            if (
-                not retryable_model_continuation
-                and _error_looks_like_provider_timeout(last_error)
-            ):
-                retryable_model_continuation = await _checkpoint_allows_model_retry(
-                    session,
-                    current_user,
-                )
+            retry_kind = decision.retry_kind
+            provider_error_category = decision.provider_error_category
+            checkpoint_state_kind = decision.checkpoint_state_kind
+            runtime_state = runtime_state or checkpoint_state_kind
     except Exception:
         pass  # Graceful fallback — no diagnostics available yet
 
@@ -509,6 +755,14 @@ async def get_runtime(
         last_call_completion_tokens=ctx_completion,
         context_window_limit=ctx_window,
         context_usage_ratio=ctx_ratio,
+        retryable_model_continuation=retryable_model_continuation,
+        retry_kind=retry_kind,
+        provider_error_category=provider_error_category,
+        checkpoint_state_kind=checkpoint_state_kind,
+        runtime_state=runtime_state or checkpoint_state_kind,
+        can_accept_user_prompt=can_accept_user_prompt,
+        open_tool_call_ids=open_tool_call_ids,
+        requires_human_input=requires_human_input,
         last_compaction_at=last_compaction_at,
         compaction_count=compaction_count,
         has_running_detached_tasks=running_detached_count > 0,
@@ -725,12 +979,22 @@ async def send_prompt(
     if recovered is not None:
         return ok(recovered)
 
-    # Persist the user message
+    await _enforce_prompt_runtime_integrity_gate(db, session, current_user)
+
+    # Persist the user message with a stable projection identity. The same
+    # identity is propagated into the LangGraph HumanMessage so checkpoint
+    # replay can reconcile instead of appending a duplicate user bubble.
+    user_message_ref = str(uuid.uuid4())
     msg = await session_svc.create_message(
         db,
         session_id=session_id,
         role="user",
-        parts=[{"type": "text", "content": body.content}],
+        parts=[{
+            "type": "text",
+            "content": body.content,
+            "origin": "user_prompt",
+            "message_ref": user_message_ref,
+        }],
     )
 
     # Enqueue start run — worker will claim and execute
@@ -742,6 +1006,7 @@ async def send_prompt(
         "session_dir": session_dir,
         "agent_id": session.agent_id,
         "model_id": session.model_id,
+        "user_message_ref": user_message_ref,
     })
 
     await session_svc.update_session_status(db, session_id, "queued")
@@ -757,6 +1022,7 @@ async def retry_session_model_continuation(
     current_user: User = Depends(get_current_user),
 ):
     """Retry the model node from a recoverable checkpoint without a user message."""
+    from agent.recovery_policy import RecoveryDecisionKind, RecoveryPolicy
     from agent.run_models import AgentRun
     from agent.scheduler import enqueue_continue
     from sqlalchemy import select as sa_select
@@ -767,6 +1033,19 @@ async def retry_session_model_continuation(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "NOT_FOUND", "message": "Session not found"},
         )
+
+    try:
+        from agent.projection_consistency import repair_session_projection_ahead
+
+        _projection, repair = await repair_session_projection_ahead(
+            db,
+            session,
+            current_user=current_user,
+        )
+        if repair and repair.repaired:
+            await db.flush()
+    except Exception:
+        logger.exception("Failed to run retry projection repair")
 
     if session.status in ("running", "waiting", "queued", "subtask_waiting"):
         raise HTTPException(
@@ -787,7 +1066,32 @@ async def retry_session_model_continuation(
     )
     last_error_run = (await db.execute(err_stmt)).scalar_one_or_none()
     hitl_recovery = await _inspect_open_hitl_recovery(db, session, current_user)
-    if hitl_recovery.action == "resume" and hitl_recovery.decisions:
+    checkpoint_state = hitl_recovery.checkpoint_state or await _load_checkpoint_state(
+        session,
+        current_user,
+    )
+    hitl_decision = RecoveryPolicy.decide(_build_recovery_input(
+        session=session,
+        checkpoint_state=checkpoint_state,
+        failed_run=last_error_run,
+        hitl_recovery=hitl_recovery,
+    ))
+    if hitl_decision.kind == RecoveryDecisionKind.WAITING_PERMISSION:
+        await session_svc.update_session_status(db, session.id, "waiting")
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "PERMISSION_WAITING",
+                "message": "Session is waiting for permission approval",
+                "retry_kind": hitl_decision.retry_kind,
+                "checkpoint_state_kind": hitl_decision.checkpoint_state_kind,
+            },
+        )
+    if (
+        hitl_decision.kind == RecoveryDecisionKind.RESUME_OPEN_HITL
+        and hitl_recovery.decisions
+    ):
         from agent.scheduler import enqueue_resume
 
         run = await enqueue_resume(db, session_id, hitl_recovery.decisions)
@@ -799,29 +1103,27 @@ async def retry_session_model_continuation(
             "mode": "resume_open_hitl",
         })
 
-    retryable = (
-        bool(last_error_run)
-        and (
-            _diagnostics_allow_model_retry(last_error_run.diagnostics)
-            or (
-                _error_looks_like_provider_timeout(last_error_run.error)
-                and await _checkpoint_allows_model_retry(session, current_user)
-            )
-        )
-    )
-    if not retryable:
+    decision = RecoveryPolicy.decide(_build_recovery_input(
+        session=session,
+        checkpoint_state=checkpoint_state,
+        failed_run=last_error_run,
+    ))
+    if decision.kind != RecoveryDecisionKind.CONTINUE_MODEL or not decision.allowed:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "code": "NOT_RETRYABLE",
                 "message": "Latest failed run is not a retryable model continuation",
+                "reason": decision.reason,
+                "provider_error_category": decision.provider_error_category,
+                "checkpoint_state_kind": decision.checkpoint_state_kind,
             },
         )
 
     run = await enqueue_continue(
         db,
         session_id,
-        payload={"mode": "retry_model_node", "source_run_id": str(last_error_run.id)},
+        payload=decision.target_payload,
     )
     await session_svc.update_session_status(db, session_id, "queued")
     await db.commit()

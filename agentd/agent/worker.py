@@ -21,9 +21,39 @@ from datetime import datetime, timezone
 
 from agent import scheduler
 from agent.executor import RecoverableProviderTimeout, execute_continue, execute_resume, execute_start
+from agent.runtime_integrity import (
+    RuntimeGateAction,
+    RuntimeIntegrityError,
+    decide_terminal_with_layered_validation,
+    persist_runtime_integrity_diagnostics,
+)
+from agent.subtask_reconciliation import reconcile_completed_child_tasks
 from core.config import settings
 from core.database import AsyncSessionLocal
 from session import service as session_svc
+
+
+def _parent_can_accept_child_bridge(parent, task) -> bool:
+    status = getattr(parent, "status", None)
+    if not parent or not task:
+        return False
+    if getattr(task, "task_kind", None) != "child_session":
+        return False
+    if getattr(task, "blocking_mode", None) != "blocking":
+        return False
+    if getattr(task, "status", None) not in {"queued", "running", "waiting"}:
+        return False
+    if getattr(task, "child_session_id", None) is None:
+        return False
+    if status == "error":
+        return False
+    return status in {"idle", "waiting", "subtask_waiting", "queued", "running"}
+
+
+async def _parent_has_subtask_result(db, parent_id: uuid.UUID, task_id: str, child_session_id: str) -> bool:
+    from agent.subtask_bridge import parent_has_subtask_result
+
+    return await parent_has_subtask_result(db, parent_id, task_id, child_session_id)
 
 
 # ── Configuration ────────────────────────────────────────────────────────
@@ -168,6 +198,7 @@ class AgentWorker:
         import time
         t0 = time.monotonic()
         try:
+            await self._record_run_start_seq(session_id, run_id)
             if run_type == "start":
                 await self._execute_start(session_id, run_id, payload)
             elif run_type == "resume":
@@ -179,12 +210,23 @@ class AgentWorker:
             else:
                 raise ValueError(f"Unknown run_type: {run_type}")
 
-            await self._assert_run_returned_terminal_state(session_id)
+            await self._assert_run_returned_terminal_state(session_id, run_id)
 
             # Mark completed
             async with AsyncSessionLocal() as db:
                 await scheduler.mark_completed(db, run_id)
                 await db.commit()
+
+            try:
+                from agent.subtask_bridge import bridge_reconcilable_child_tasks
+
+                await bridge_reconcilable_child_tasks(
+                    parent_session_id=uuid.UUID(session_id),
+                    publish=self._publish,
+                )
+            except Exception:
+                if settings.debug:
+                    traceback.print_exc()
 
             elapsed = time.monotonic() - t0
             active_count = len(self._active_runs) - 1  # this one is finishing
@@ -265,7 +307,11 @@ class AgentWorker:
             sid = uuid.UUID(session_id)
             self._active_sessions.discard(sid)
 
-    async def _assert_run_returned_terminal_state(self, session_id: str) -> None:
+    async def _assert_run_returned_terminal_state(
+        self,
+        session_id: str,
+        run_id: uuid.UUID | None = None,
+    ) -> None:
         """Guard scheduler completion against obvious session state drift."""
         try:
             async with AsyncSessionLocal() as db:
@@ -279,16 +325,212 @@ class AgentWorker:
             return
 
         status = getattr(session, "status", None)
-        if status in {"idle", "waiting", "subtask_waiting"}:
-            return
         if status == "error":
             raise RuntimeError(
                 "Executor returned after setting session error; refusing to mark run completed"
             )
-        raise RuntimeError(
-            f"Executor returned with non-terminal session status={status!r}; "
-            "refusing to mark run completed"
+        if status not in {"idle", "waiting", "subtask_waiting"}:
+            raise RuntimeError(
+                f"Executor returned with non-terminal session status={status!r}; "
+                "refusing to mark run completed"
+            )
+
+        try:
+            async with AsyncSessionLocal() as db:
+                await reconcile_completed_child_tasks(db, uuid.UUID(session_id))
+                await db.commit()
+        except Exception:
+            if settings.debug:
+                traceback.print_exc()
+
+        decision = await self._load_terminal_runtime_integrity_decision(
+            session_id,
+            run_id,
+            session,
         )
+        if decision.action == RuntimeGateAction.FINALIZE_IDLE:
+            return
+        if decision.action == RuntimeGateAction.ENTER_SUBTASK_WAITING:
+            if status != "subtask_waiting":
+                async with AsyncSessionLocal() as db:
+                    await session_svc.update_session_status(
+                        db,
+                        uuid.UUID(session_id),
+                        "subtask_waiting",
+                    )
+                    await db.commit()
+                await self._publish(
+                    session_id,
+                    {"event": "status_change", "status": "subtask_waiting"},
+                )
+            return
+        if decision.action == RuntimeGateAction.ENTER_WAITING:
+            if status != "waiting":
+                async with AsyncSessionLocal() as db:
+                    await session_svc.update_session_status(
+                        db,
+                        uuid.UUID(session_id),
+                        "waiting",
+                    )
+                    await db.commit()
+                await self._publish(
+                    session_id,
+                    {"event": "status_change", "status": "waiting"},
+                )
+            return
+        raise RuntimeIntegrityError(session_id, decision)
+
+    async def _load_terminal_runtime_integrity_decision(
+        self,
+        session_id: str,
+        run_id: uuid.UUID | None,
+        session,
+    ):
+        from unittest.mock import Mock
+
+        async with AsyncSessionLocal() as db:
+            if isinstance(db, Mock):
+                from agent.runtime_integrity import RuntimeGateDecision
+
+                return RuntimeGateDecision(
+                    action=RuntimeGateAction.FINALIZE_IDLE,
+                    reason="mock_db_bypass",
+                    can_accept_user_prompt=True,
+                )
+
+            sid = uuid.UUID(session_id)
+            checkpoint_state = None
+            checkpoint_messages = []
+            try:
+                from auth.models import User
+                from agent.checkpoint_state import classify_checkpoint_snapshot
+                from agent.child_session import read_child_session_meta
+                from agent.runtime import build_agent
+                from workspace.manager import get_session_dir
+
+                user = await db.get(User, session.user_id)
+                user_root = user.workspace if user else settings.workspace_root
+                session_dir = get_session_dir(user_root, session_id)
+                parent_session_dir = None
+                allowed_tools = None
+                if session.parent_id:
+                    parent_session_dir = get_session_dir(user_root, str(session.parent_id))
+                    child_meta = read_child_session_meta(session_dir)
+                    allowed_tools = (
+                        child_meta.get("resolved_tools")
+                        or child_meta.get("allowed_tools")
+                        or None
+                    )
+                agent = await build_agent(
+                    session_id=session_id,
+                    user_id=str(session.user_id),
+                    user_root=user_root,
+                    session_dir=session_dir,
+                    agent_id=session.agent_id,
+                    model_id=session.model_id,
+                    tool_profile="child" if session.parent_id else None,
+                    parent_session_dir=parent_session_dir,
+                    allowed_tools=allowed_tools,
+                    run_id=str(run_id) if run_id else None,
+                )
+                snapshot = await agent.aget_state({"configurable": {"thread_id": session_id}})
+                values = getattr(snapshot, "values", {}) or {}
+                checkpoint_messages = list(values.get("messages", []) or [])
+                checkpoint_state = classify_checkpoint_snapshot(snapshot) if snapshot else None
+            except Exception:
+                if settings.debug:
+                    traceback.print_exc()
+
+            from permission import service as perm_svc
+
+            from agent.run_models import AgentRun
+
+            run = await db.get(AgentRun, run_id) if run_id else None
+            diagnostics = dict(getattr(run, "diagnostics", None) or {}) if run else {}
+            run_start_seq = diagnostics.get("run_start_seq")
+            try:
+                run_start_seq = int(run_start_seq) if run_start_seq is not None else None
+            except (TypeError, ValueError):
+                run_start_seq = None
+            pending_permissions = await perm_svc.get_pending_by_session(db, sid)
+            decision, warning = await decide_terminal_with_layered_validation(
+                db,
+                session_id=sid,
+                session_status=getattr(session, "status", None),
+                checkpoint_state=checkpoint_state,
+                pending_permissions=pending_permissions,
+                run_start_seq=run_start_seq,
+                latest_run_type=getattr(run, "run_type", None),
+                latest_run_status=getattr(run, "status", None),
+                latest_error=getattr(run, "error", None),
+            )
+            if (
+                decision.action == RuntimeGateAction.FAIL_INTEGRITY_ERROR
+                and str(decision.reason).startswith("db_tail_open_tool_call")
+            ):
+                try:
+                    from agent.projection_consistency import (
+                        inspect_db_checkpoint_projection,
+                        repair_db_projection_ahead,
+                    )
+
+                    projection = await inspect_db_checkpoint_projection(
+                        db,
+                        sid,
+                        checkpoint_messages,
+                    )
+                    if projection.is_db_projection_ahead:
+                        repair = await repair_db_projection_ahead(db, projection)
+                        decision, rerun_warning = await decide_terminal_with_layered_validation(
+                            db,
+                            session_id=sid,
+                            session_status=getattr(session, "status", None),
+                            checkpoint_state=checkpoint_state,
+                            pending_permissions=pending_permissions,
+                            run_start_seq=run_start_seq,
+                            latest_run_type=getattr(run, "run_type", None),
+                            latest_run_status=getattr(run, "status", None),
+                            latest_error=getattr(run, "error", None),
+                        )
+                        repair_warning = {
+                            "resolved_by": "db_projection_ahead_repair",
+                            "projection_consistency": projection.to_dict(),
+                            "projection_repair": repair.to_dict(),
+                        }
+                        if warning:
+                            repair_warning["previous_warning"] = warning
+                        if rerun_warning:
+                            repair_warning["rerun_warning"] = rerun_warning
+                        warning = repair_warning
+                except Exception:
+                    if settings.debug:
+                        traceback.print_exc()
+            await persist_runtime_integrity_diagnostics(db, run_id, decision, warning)
+            await db.commit()
+            return decision
+
+    async def _record_run_start_seq(self, session_id: str, run_id: uuid.UUID) -> None:
+        try:
+            async with AsyncSessionLocal() as db:
+                from unittest.mock import Mock
+                if isinstance(db, Mock):
+                    return
+                from agent.run_models import AgentRun
+
+                run = await db.get(AgentRun, run_id)
+                if not run:
+                    return
+                diagnostics = dict(getattr(run, "diagnostics", None) or {})
+                if diagnostics.get("run_start_seq") is None:
+                    diagnostics["run_start_seq"] = await session_svc.get_last_message_seq(
+                        db,
+                        uuid.UUID(session_id),
+                    )
+                    await scheduler.update_diagnostics(db, run_id, diagnostics)
+                    await db.commit()
+        except Exception:
+            if settings.debug:
+                traceback.print_exc()
 
     def _reap_done_tasks(self) -> None:
         """Clean up completed/failed tasks from _active_runs."""
@@ -371,6 +613,7 @@ class AgentWorker:
             agent_id=payload["agent_id"],
             model_id=payload["model_id"],
             user_message=payload["user_message"],
+            user_message_ref=payload.get("user_message_ref"),
             publish=self._publish,
             check_abort=check_abort,
             tool_profile=payload.get("tool_profile"),
@@ -407,6 +650,15 @@ class AgentWorker:
     async def _execute_continue(self, session_id: str, run_id: uuid.UUID, payload: dict) -> None:
         """Execute a checkpoint continuation run."""
         from agent.executor import _update_db_status
+
+        if (
+            not isinstance(payload, dict)
+            or payload.get("mode") != "retry_model_node"
+            or not payload.get("source_run_id")
+        ):
+            raise RuntimeError(
+                "Invalid continue run payload: mode=retry_model_node and source_run_id are required"
+            )
 
         await _update_db_status(session_id, "running")
         await self._publish(session_id, {"event": "status_change", "status": "running"})
@@ -459,6 +711,31 @@ class AgentWorker:
         """
         parent_session_id: str | None = None
         try:
+            from agent.subtask_bridge import bridge_reconcilable_child_tasks
+
+            sweep = await bridge_reconcilable_child_tasks(
+                child_session_id=uuid.UUID(child_session_id),
+                publish=self._publish,
+            )
+            if sweep.parent_session_id:
+                parent_session_id = sweep.parent_session_id
+            if sweep.bridged_task_ids or sweep.already_bridged_task_ids:
+                print(
+                    f"[worker:{self.worker_id}] Bridged child result sweep: "
+                    f"child={child_session_id[:8]} "
+                    f"parent={(sweep.parent_session_id or '')[:8]} "
+                    f"bridged={sweep.bridged_task_ids} "
+                    f"already={sweep.already_bridged_task_ids} "
+                    f"delayed={sweep.delayed_task_ids} "
+                    f"run={sweep.enqueued_run_id}"
+                )
+            return
+        except Exception as e:
+            print(f"[worker:{self.worker_id}] Child result bridge sweep failed: {e}")
+            if settings.debug:
+                traceback.print_exc()
+
+        try:
             from session.models import Session
             from agent.task_models import SessionTask
             from agent.executor import _update_db_status
@@ -467,6 +744,7 @@ class AgentWorker:
             import auth.models  # noqa: F401
 
             child_sid = uuid.UUID(child_session_id)
+            task = None
 
             # 1. Check parent_id
             async with AsyncSessionLocal() as db:
@@ -478,9 +756,31 @@ class AgentWorker:
                 parent = await db.get(Session, parent_id)
                 if not parent:
                     return
+                result = await db.execute(
+                    select(SessionTask).where(
+                        SessionTask.child_session_id == child_sid,
+                    )
+                )
+                task = result.scalar_one_or_none()
 
-                # Only bridge if parent is actually waiting
-                if parent.status != "subtask_waiting":
+                # Only bridge if parent is actually waiting for this child. A
+                # short-lived v0.4.4 regression could collapse subtask_waiting
+                # into generic waiting; accept that stale state only when the
+                # blocking child task matches this completed child session.
+                bridge_task_id = str(task.id) if task else ""
+                if await _parent_has_subtask_result(
+                    db,
+                    parent_id,
+                    bridge_task_id,
+                    child_session_id,
+                ):
+                    if task and task.status != "completed":
+                        await reconcile_completed_child_tasks(db, parent_id)
+                        task.status = "completed"
+                        task.result_ref = f".agentd/tasks/{task.id}/result.json"
+                        await db.commit()
+                    return
+                if not _parent_can_accept_child_bridge(parent, task):
                     return
 
                 parent_session_id = str(parent_id)
@@ -620,6 +920,15 @@ class AgentWorker:
                         "Parent checkpoint tool adjacency remains invalid; "
                         "refusing to enqueue subtask continuation"
                     )
+
+                if await _parent_has_subtask_result(
+                    db,
+                    parent_id,
+                    bridge_task_id,
+                    child_session_id,
+                ):
+                    await db.commit()
+                    return
 
                 # Persist child result as an assistant message with subtask_result part
                 from session import service as session_svc

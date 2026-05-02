@@ -153,7 +153,8 @@ class TestProviderReasoningHelpers:
                 ),
             ])
 
-        assert exc_info.value.code == "TRANSCRIPT_INTEGRITY_ERROR"
+        assert exc_info.value.code == "PROVIDER_PAYLOAD_VALIDATION_ERROR"
+        assert exc_info.value.provider_error_category == "provider_payload_validation_error"
         assert exc_info.value.issues[0]["missing_tool_call_ids"] == ["call_missing"]
 
     def test_provider_payload_sanitizer_requires_explicit_fallback_flag(self):

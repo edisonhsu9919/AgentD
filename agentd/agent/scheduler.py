@@ -60,14 +60,20 @@ async def enqueue_resume(
 async def enqueue_continue(
     db: AsyncSession,
     session_id: uuid.UUID,
-    payload: dict | None = None,
+    payload: dict,
 ) -> AgentRun:
     """Enqueue a checkpoint continuation without appending a user message."""
+    if (
+        not isinstance(payload, dict)
+        or payload.get("mode") != "retry_model_node"
+        or not payload.get("source_run_id")
+    ):
+        raise ValueError("continue run requires mode=retry_model_node and source_run_id")
     run = AgentRun(
         session_id=session_id,
         run_type="continue",
         status="queued",
-        payload=payload or {"mode": "retry_model_node"},
+        payload=payload,
     )
     db.add(run)
     await db.flush()

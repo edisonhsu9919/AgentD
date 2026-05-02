@@ -554,6 +554,26 @@ async def compact_session(
     snapshot = await agent.aget_state(config)
     messages = (snapshot.values or {}).get("messages", [])
 
+    checkpoint_open_group = _checkpoint_open_tool_group(messages)
+    if checkpoint_open_group:
+        return {
+            "compacted": False,
+            "reason": "open_tool_group_defer_summary",
+            "source": "checkpoint",
+            "open_tool_call_ids": checkpoint_open_group,
+            "message_count": len(messages),
+        }
+
+    db_open_group = await _db_open_tool_group(session_id)
+    if db_open_group:
+        return {
+            "compacted": False,
+            "reason": "open_tool_group_defer_summary",
+            "source": "db",
+            "open_tool_call_ids": db_open_group,
+            "message_count": len(messages),
+        }
+
     min_required = FRONTIER_KEEP + MIN_COMPACTABLE
     if len(messages) < min_required:
         return {
@@ -612,12 +632,27 @@ async def compact_session(
         # Get the seq of the last compacted message for audit trail
         last_compacted_seq = 0
         async with AsyncSessionLocal() as db:
+            from agent.message_persistence import projection_can_append
+
             last_compacted_seq = await session_svc.get_last_message_seq(db, uuid.UUID(session_id))
+            summary_parts = [{"type": "text", "content": f"[Context Summary]\n{summary_text}"}]
+            if not await projection_can_append(
+                db,
+                uuid.UUID(session_id),
+                "user",
+                summary_parts,
+            ):
+                return {
+                    "compacted": False,
+                    "reason": "open_tool_group_defer_summary",
+                    "source": "db_pre_persist",
+                    "message_count": len(messages),
+                }
             await session_svc.create_message(
                 db,
                 session_id=uuid.UUID(session_id),
                 role="user",
-                parts=[{"type": "text", "content": f"[Context Summary]\n{summary_text}"}],
+                parts=summary_parts,
                 is_summary=True,
             )
             await db.commit()
@@ -678,3 +713,27 @@ async def compact_session(
     }
     logger.info("Compaction complete for session %s: %s", session_id, result)
     return result
+
+
+def _checkpoint_open_tool_group(messages: list) -> list[str]:
+    """Return unclosed checkpoint tool-call ids, if hard compact must defer."""
+    try:
+        from agent.checkpoint_state import analyze_tool_adjacency
+
+        analysis = analyze_tool_adjacency(messages)
+        return list(analysis.orphan_tool_call_ids or [])
+    except Exception:
+        return []
+
+
+async def _db_open_tool_group(session_id: str) -> list[str]:
+    """Return unclosed DB tool-call ids, if hard compact must defer."""
+    try:
+        from agent.runtime_integrity import inspect_db_transcript_tail
+
+        async with AsyncSessionLocal() as db:
+            messages = await session_svc.list_messages(db, uuid.UUID(session_id))
+        tail = inspect_db_transcript_tail(messages[-50:])
+        return list(tail.open_tool_call_ids or []) if tail.has_open_tool_call else []
+    except Exception:
+        return []

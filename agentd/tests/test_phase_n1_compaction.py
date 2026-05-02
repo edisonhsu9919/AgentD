@@ -659,6 +659,73 @@ class TestCompactSessionOrchestration:
         assert result["compacted"] is False
 
     @pytest.mark.asyncio
+    async def test_open_checkpoint_tool_group_defers_summary(self):
+        """Hard compact must not insert a summary into an open tool group."""
+        import uuid as _uuid
+        test_sid = str(_uuid.uuid4())
+
+        msgs = _build_long_conversation(n_rounds=25)
+        msgs.append(_ai(
+            "parallel tools",
+            idx=98,
+            tool_calls=[
+                {"id": "call_a", "name": "list_dir", "args": {}},
+                {"id": "call_b", "name": "launch_subagent", "args": {}},
+            ],
+        ))
+        msgs.append(_tool("files", name="list_dir", call_id="call_a", idx=98))
+
+        agent = AsyncMock()
+        snapshot = MagicMock()
+        snapshot.values = {"messages": msgs}
+        agent.aget_state.return_value = snapshot
+
+        with patch("agent.compaction.generate_summary", new_callable=AsyncMock) as mock_gen:
+            result = await compact_session(
+                agent=agent,
+                config={"configurable": {"thread_id": test_sid}},
+                session_id=test_sid,
+                session_dir="/tmp/test",
+                model_id="test-model",
+            )
+
+        assert result["compacted"] is False
+        assert result["reason"] == "open_tool_group_defer_summary"
+        assert result["source"] == "checkpoint"
+        assert result["open_tool_call_ids"] == ["call_b"]
+        mock_gen.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_open_db_tool_group_defers_summary(self):
+        """Hard compact also checks DB projection before summary generation."""
+        import uuid as _uuid
+        test_sid = str(_uuid.uuid4())
+
+        msgs = _build_long_conversation(n_rounds=25)
+        agent = AsyncMock()
+        snapshot = MagicMock()
+        snapshot.values = {"messages": msgs}
+        agent.aget_state.return_value = snapshot
+
+        with (
+            patch("agent.compaction._db_open_tool_group", new=AsyncMock(return_value=["call_b"])),
+            patch("agent.compaction.generate_summary", new_callable=AsyncMock) as mock_gen,
+        ):
+            result = await compact_session(
+                agent=agent,
+                config={"configurable": {"thread_id": test_sid}},
+                session_id=test_sid,
+                session_dir="/tmp/test",
+                model_id="test-model",
+            )
+
+        assert result["compacted"] is False
+        assert result["reason"] == "open_tool_group_defer_summary"
+        assert result["source"] == "db"
+        assert result["open_tool_call_ids"] == ["call_b"]
+        mock_gen.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_full_compaction_flow(self, tmp_path):
         """Full happy path: classify → summarize → DB → JSON → checkpoint."""
         import uuid as _uuid

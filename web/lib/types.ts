@@ -298,7 +298,7 @@ export interface FileMeta {
 export interface Runtime {
   session_id: string;
   status: SessionStatus;
-  phase: "running" | "permission_waiting" | "error" | null;
+  phase: "queued" | "running" | "permission_waiting" | "subtask_waiting" | "error" | null;
   last_message_seq: number;
   pending_permissions_count: number;
   resumable: boolean;
@@ -308,6 +308,10 @@ export interface Runtime {
   last_call_completion_tokens: number | null;
   context_window_limit: number | null;
   context_usage_ratio: number | null;
+  runtime_state?: string | null;
+  can_accept_user_prompt?: boolean;
+  open_tool_call_ids?: string[];
+  requires_human_input?: boolean;
   last_compaction_at: string | null;
   compaction_count: number;
   has_running_detached_tasks: boolean;
@@ -642,6 +646,34 @@ export interface StreamingToolCall {
   output?: string;
   is_error?: boolean;
 }
+
+export type StreamingTimelineItem =
+  | {
+      id: string;
+      kind: "text";
+      content: string;
+      createdAt: number;
+      updatedAt: number;
+    }
+  | {
+      id: string;
+      kind: "reasoning";
+      content: string;
+      createdAt: number;
+      updatedAt: number;
+    }
+  | {
+      id: string;
+      kind: "tool";
+      tool_call_id: string;
+      tool_name: string;
+      input: Record<string, unknown>;
+      output?: string;
+      is_error?: boolean;
+      status: "running" | "completed" | "error";
+      createdAt: number;
+      updatedAt: number;
+    };
 
 // --- Task Instance (Phase P3) ---
 

@@ -196,6 +196,30 @@ async def get_resolved_by_session(
     return list(result.scalars().all())
 
 
+async def get_resolved_by_tool_call_ids(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    tool_call_ids: list[str],
+) -> list[PermissionRequest]:
+    """Get unresolved resume decisions for the current HITL tool-call batch."""
+    ids = [tool_call_id for tool_call_id in tool_call_ids if tool_call_id]
+    if not ids:
+        return []
+    result = await db.execute(
+        select(PermissionRequest)
+        .where(
+            PermissionRequest.session_id == session_id,
+            PermissionRequest.tool_call_id.in_(ids),
+            PermissionRequest.status.in_(["approved", "denied"]),
+        )
+        .order_by(PermissionRequest.created_at)
+    )
+    rows = list(result.scalars().all())
+    order = {tool_call_id: idx for idx, tool_call_id in enumerate(ids)}
+    rows.sort(key=lambda row: order.get(row.tool_call_id, len(order)))
+    return rows
+
+
 async def mark_resolved_as_resumed(
     db: AsyncSession, session_id: uuid.UUID
 ) -> int:
@@ -208,6 +232,27 @@ async def mark_resolved_as_resumed(
         update(PermissionRequest)
         .where(
             PermissionRequest.session_id == session_id,
+            PermissionRequest.status.in_(["approved", "denied"]),
+        )
+        .values(status="resumed")
+    )
+    return result.rowcount
+
+
+async def mark_resolved_as_resumed_by_tool_call_ids(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    tool_call_ids: list[str],
+) -> int:
+    """Mark only the current interrupt batch's approved/denied rows as resumed."""
+    ids = [tool_call_id for tool_call_id in tool_call_ids if tool_call_id]
+    if not ids:
+        return 0
+    result = await db.execute(
+        update(PermissionRequest)
+        .where(
+            PermissionRequest.session_id == session_id,
+            PermissionRequest.tool_call_id.in_(ids),
             PermissionRequest.status.in_(["approved", "denied"]),
         )
         .values(status="resumed")

@@ -299,6 +299,14 @@ async def compact_context(state: AgentState) -> dict[str, Any]:
     session_id = state["session_id"]
     messages = state["messages"]
 
+    try:
+        from agent.checkpoint_state import analyze_tool_adjacency
+
+        if analyze_tool_adjacency(messages).orphan_tool_call_ids:
+            return {}
+    except Exception:
+        return {}
+
     # Keep at least the last 4 messages intact
     if len(messages) <= 6:
         return {}

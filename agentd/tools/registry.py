@@ -386,6 +386,18 @@ def _make_coroutine(tool: BaseTool, ctx: ToolContext):
     return _run
 
 
+async def execute_registered_tool(
+    tool_name: str,
+    ctx: ToolContext,
+    tool_input: dict[str, Any],
+) -> str:
+    """Execute a registered tool through the same runtime wrapper as ToolNode."""
+    tool = get_registry().get(tool_name)
+    if tool is None:
+        raise ToolException(f"Unknown tool: {tool_name}")
+    return await _make_coroutine(tool, ctx)(**dict(tool_input or {}))
+
+
 def _truncate_to_artifact(
     output: str,
     max_chars: int,

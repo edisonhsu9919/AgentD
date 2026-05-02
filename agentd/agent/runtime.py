@@ -668,6 +668,8 @@ async def build_agent(
     # Phase N1: attach session metadata for auto-compaction in executor
     agent._session_dir = session_dir
     agent._workspace_dir = effective_workspace
+    agent._user_id = user_id
+    agent._user_root = user_root
     agent._model_id = model_id
     agent._run_id = run_id or ""
     agent._provider_type = resolved.provider_type
