@@ -432,4 +432,4 @@ class TestMigration010:
 
     def test_expected_schema_version(self):
         from main import EXPECTED_SCHEMA_VERSION
-        assert EXPECTED_SCHEMA_VERSION == "015"
+        assert EXPECTED_SCHEMA_VERSION == "016"

@@ -39,7 +39,7 @@ class TestMigration011(unittest.TestCase):
 
     def test_expected_schema_version(self):
         from main import EXPECTED_SCHEMA_VERSION
-        assert EXPECTED_SCHEMA_VERSION == "015"
+        assert EXPECTED_SCHEMA_VERSION == "016"
 
     def test_agent_run_model_has_diagnostics(self):
         from agent.run_models import AgentRun
@@ -342,7 +342,15 @@ class TestPromptAssemblyTrace(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             _, diag = build_system_prompt(agent_id="build", session_dir=tmpdir)
         order = diag["prompt_assembly_order"]
-        expected_names = ["role", "rules", "header", "skills", "task_plan", "compaction_context"]
+        expected_names = [
+            "role",
+            "rules",
+            "header",
+            "skills",
+            "domain_extensions",
+            "task_plan",
+            "compaction_context",
+        ]
         actual_names = [entry["name"] for entry in order]
         self.assertEqual(actual_names, expected_names)
         for entry in order:
@@ -433,7 +441,7 @@ class TestMigration012(unittest.TestCase):
 
     def test_expected_schema_version(self):
         from main import EXPECTED_SCHEMA_VERSION
-        assert EXPECTED_SCHEMA_VERSION == "015"
+        assert EXPECTED_SCHEMA_VERSION == "016"
 
     def test_model_config_has_context_window(self):
         from model_config.models import ModelConfig
@@ -590,12 +598,13 @@ class TestProviderContextWindowDiscovery(unittest.TestCase):
         source = inspect.getsource(resolve_active_model_config)
         self.assertIn("discover_provider_context_window", source)
 
-    def test_resolver_prefers_discovered_over_manual(self):
-        """Resolver docstring should document provider-first priority."""
+    def test_resolver_prefers_manual_over_discovered(self):
+        """Resolver docstring should document DB manual cap priority."""
         import inspect
         from model_config.service import resolve_active_model_config
         doc = inspect.getdoc(resolve_active_model_config)
-        self.assertIn("Provider", doc)
+        self.assertIn("DB model_configs.context_window", doc)
+        self.assertIn("manual runtime cap", doc)
 
     def test_discovery_reads_nested_meta(self):
         """discover_provider_context_window should read meta.n_ctx_train (llama.cpp)."""

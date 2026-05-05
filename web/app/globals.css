@@ -510,6 +510,25 @@ a {
   color: color-mix(in srgb, var(--muted-foreground) 70%, transparent);
 }
 
+.filter-select {
+  min-height: 2.5rem;
+  border: 0;
+  border-radius: var(--app-radius-pill);
+  background: color-mix(in srgb, var(--tile) 82%, transparent);
+  padding: 0 0.9rem;
+  font-size: 0.875rem;
+  color: var(--foreground);
+  outline: none;
+  transition:
+    background 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.filter-select:focus {
+  background: #ffffff;
+  box-shadow: 0 0 0 4px rgba(87, 73, 244, 0.12);
+}
+
 .btn-primary {
   display: inline-flex;
   align-items: center;

@@ -16,7 +16,9 @@ function ProtectedWorkspaceFrame({
   const isAdminRoute = pathname.startsWith("/admin");
   const isChatRoute = pathname.startsWith("/chat");
   const isScrollableRoute =
-    pathname.startsWith("/admin") || pathname.startsWith("/user");
+    pathname.startsWith("/admin") ||
+    pathname.startsWith("/user") ||
+    pathname.startsWith("/extensions");
   const { ready, user } = useAuthGate({
     requireAdmin: isAdminRoute,
   });
@@ -72,6 +74,7 @@ export default function WorkspaceFrame({
   const isWorkspaceRoute =
     pathname.startsWith("/chat") ||
     pathname.startsWith("/knowledge") ||
+    pathname.startsWith("/extensions") ||
     pathname.startsWith("/square") ||
     pathname.startsWith("/user") ||
     pathname.startsWith("/admin");

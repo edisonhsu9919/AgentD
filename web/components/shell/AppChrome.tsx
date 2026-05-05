@@ -1,22 +1,26 @@
 "use client";
 
-import { useLayoutEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   BookOpen,
+  Layers,
   LogOut,
   MessageSquareText,
   Shield,
   Sparkles,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import AgentDLockup from "@/components/brand/AgentDLockup";
 import { useAuthStore } from "@/store/auth";
+import { useExtensionStore } from "@/store/extensions";
 
 export interface AppChromeNavItem {
   href: string;
   label: string;
   active?: boolean;
+  icon?: LucideIcon;
 }
 
 interface AppChromeProps {
@@ -41,6 +45,8 @@ export default function AppChrome({
   const pathname = usePathname();
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
+  const extensions = useExtensionStore((s) => s.extensions);
+  const fetchExtensions = useExtensionStore((s) => s.fetchExtensions);
   const userInitial = user?.username?.trim().charAt(0).toUpperCase() || "A";
   const navRef = useRef<HTMLDivElement | null>(null);
   const indicatorRef = useRef<HTMLSpanElement | null>(null);
@@ -49,8 +55,37 @@ export default function AppChrome({
   const subIndicatorRef = useRef<HTMLSpanElement | null>(null);
   const subItemRefs = useRef<Record<string, HTMLAnchorElement | null>>({});
 
-  const primaryNavItems = useMemo(
-    () => [
+  useEffect(() => {
+    if (user) {
+      fetchExtensions();
+    }
+  }, [fetchExtensions, user]);
+
+  const primaryNavItems = useMemo(() => {
+    const hasRealExtension = extensions.some(
+      (extension) =>
+        extension.status === "enabled" && extension.name !== "example-domain",
+    );
+    const extensionNavItems = extensions
+      .filter((extension) => {
+        if (extension.name === "example-domain" && hasRealExtension) return false;
+        if (!extension.nav || !extension.frontend) return false;
+        if (extension.frontend.page_kind !== "generic_extension") return false;
+        if (extension.status !== "enabled") return false;
+        if (extension.visibility === "admin" && user?.role !== "admin") return false;
+        return true;
+      })
+      .sort((a, b) => (a.nav?.order ?? 100) - (b.nav?.order ?? 100))
+      .map((extension) => ({
+        href: extension.nav?.href || `/extensions/${extension.name}`,
+        label: extension.nav?.label || extension.display_name,
+        active: pathname?.startsWith(
+          extension.nav?.href || `/extensions/${extension.name}`,
+        ),
+        icon: Layers,
+      }));
+
+    return [
       {
         href: "/chat",
         label: "对话工作台",
@@ -69,6 +104,7 @@ export default function AppChrome({
         active: pathname?.startsWith("/square"),
         icon: Sparkles,
       },
+      ...extensionNavItems,
       ...(user?.role === "admin"
         ? [
             {
@@ -79,9 +115,8 @@ export default function AppChrome({
             },
           ]
         : []),
-    ],
-    [pathname, user?.role],
-  );
+    ];
+  }, [extensions, pathname, user?.role]);
 
   useLayoutEffect(() => {
     const activeItem = primaryNavItems.find((item) => item.active);
@@ -154,7 +189,7 @@ export default function AppChrome({
                 style={{ opacity: 0, width: 0 }}
               />
               {primaryNavItems.map((item) => {
-                const Icon = item.icon;
+                const Icon = item.icon || Layers;
 
                 return (
                   <Link

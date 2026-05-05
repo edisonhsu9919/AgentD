@@ -102,6 +102,14 @@ class Settings(BaseSettings):
         default="/skills",
         description="Legacy skill directory fallback. Not used in normal operation.",
     )
+    extension_dirs: str = Field(
+        default="",
+        description=(
+            "Optional os.pathsep-separated extension roots. "
+            "When empty, AgentD scans /opt/agentd/extensions and <repo>/extensions."
+        ),
+        alias="AGENTD_EXTENSION_DIRS",
+    )
 
     # ── DB connection pool ──────────────────────────────────────────────────
     # These are per-process settings. If running multiple API workers or

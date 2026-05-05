@@ -242,9 +242,9 @@ class TestRegistryP6B:
         assert "knowledge_search" in registry.tools
         assert "knowledge_read" in registry.tools
 
-    def test_tool_count_is_16(self):
+    def test_tool_count_is_22(self):
         registry = get_registry()
-        assert len(registry.tools) == 16
+        assert len(registry.tools) == 22
 
     def test_child_profile_includes_knowledge_tools(self):
         registry = get_registry()

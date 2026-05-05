@@ -22,9 +22,11 @@ async def lifespan(app: FastAPI):
     _STARTED_AT = datetime.now(timezone.utc).isoformat()
     print(f"[startup] Instance {_INSTANCE_ID} (PID={os.getpid()}) starting at {_STARTED_AT}")
 
+    print(f"[startup] Edition: {AGENTD_EDITION} | schema_expected={EXPECTED_SCHEMA_VERSION}")
     await _check_schema_version()
     await _log_runtime_model()
     await _log_runtime_vlm()
+    _log_extensions()
     _log_tool_registry()
     _ensure_knowledge_store()
     await _seed_admin()
@@ -41,7 +43,8 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
 
 
-EXPECTED_SCHEMA_VERSION = "015"
+EXPECTED_SCHEMA_VERSION = "016"
+AGENTD_EDITION = os.environ.get("AGENTD_EDITION", "public").strip().lower() or "public"
 
 
 async def _check_schema_version() -> None:
@@ -133,6 +136,21 @@ def _log_tool_registry() -> None:
     print(f"[startup] Tool registry: {len(names)} tools — {', '.join(names)}")
 
 
+def _log_extensions() -> None:
+    """Log extension status without failing startup."""
+    from extensions.registry import get_extension_registry
+
+    registry = get_extension_registry()
+    runtimes = registry.all_runtimes()
+    enabled = [runtime.name for runtime in runtimes if runtime.status == "enabled"]
+    errored = [f"{runtime.name}:{runtime.error}" for runtime in runtimes if runtime.status == "error"]
+    disabled = [runtime.name for runtime in runtimes if runtime.status == "disabled"]
+    print(
+        f"[startup] Extensions: enabled={enabled or []} "
+        f"disabled={disabled or []} errors={errored or []}"
+    )
+
+
 def _ensure_knowledge_store() -> None:
     """Phase P6-A: ensure knowledge directory structure exists at startup."""
     from knowledge.store import ensure_knowledge_dirs, get_knowledge_root
@@ -181,6 +199,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# v0.4.5 / C1: discover extensions before routers are included. Extension
+# hot-plug is a non-goal; newly installed extensions take effect after restart.
+from extensions.loader import load_extensions
+_extension_registry = load_extensions()
 
 # ── Global exception handlers ─────────────────────────────────────────────────
 
@@ -245,6 +268,17 @@ app.include_router(model_public_runtime_router, prefix="/api/runtime", tags=["ru
 # Phase P6-D: Knowledge Base API
 from knowledge.router import router as knowledge_router
 app.include_router(knowledge_router, prefix="/api/knowledge", tags=["knowledge"])
+
+# v0.4.5 / C1 — Domain extension metadata and extension routers
+from extensions.router import router as extension_metadata_router
+app.include_router(extension_metadata_router, prefix="/api/extensions", tags=["extensions"])
+
+for loaded_router in _extension_registry.get_routers():
+    app.include_router(
+        loaded_router.router,
+        prefix=loaded_router.prefix,
+        tags=[f"extension:{loaded_router.extension_name}"],
+    )
 
 
 # ── Health check (Phase I4 — readiness-level) ────────────────────────────────

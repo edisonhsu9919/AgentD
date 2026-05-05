@@ -29,6 +29,7 @@ class Session(Base):
         nullable=True,
     )
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="idle")
+    is_internal: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     interrupt_requested_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True,
         doc="Non-null = abort requested; running worker checks this at tool boundaries (Phase 7A)",

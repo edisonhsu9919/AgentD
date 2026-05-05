@@ -257,6 +257,48 @@ class TestFileInspectTool:
         assert "file_read" in result["output"]
 
     @pytest.mark.asyncio
+    async def test_inspect_json_structure_summary(self, tmp_path):
+        """JSON inspection should return structure hints without full long text."""
+        from tools.file_inspect import FileInspectTool
+
+        long_text = "保险责任内容" * 200
+        payload = {
+            "project": "大唐条款比对",
+            "sections": [
+                {
+                    "section_name": "财产一切险",
+                    "corrected_clauses": [
+                        {
+                            "name": "锅炉、压力容器扩展条款",
+                            "content": long_text,
+                        }
+                    ],
+                },
+                {
+                    "section_name": "机器损坏险",
+                    "corrected_clauses": [],
+                },
+            ],
+        }
+        json_path = tmp_path / "clauses.json"
+        json_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+        tool = FileInspectTool()
+        ctx = _make_ctx(str(tmp_path))
+
+        result = await tool.execute(ctx, path="clauses.json")
+        assert result["is_error"] is False
+
+        data = json.loads(result["output"])
+        assert data["kind"] == "json"
+        assert data["top_level_type"] == "object"
+        assert "sections" in data["top_level_keys"]
+        assert data["sections"][0]["section_name"] == "财产一切险"
+        assert data["sections"][0]["corrected_clauses_count"] == 1
+        assert "extract a small task-specific JSON file" in data["recommendation"]
+        assert long_text not in result["output"]
+
+    @pytest.mark.asyncio
     async def test_inspect_file_not_found(self, tmp_path):
         from tools.file_inspect import FileInspectTool
 
@@ -316,11 +358,11 @@ class TestFileInspectRegistry:
         assert registry.default_permission("file_inspect") == "allow"
 
     def test_tool_count_is_11(self):
-        """After O1, we should have 11 tools registered."""
+        """After C1, default example extension adds one tool."""
         from tools.registry import get_registry
 
         registry = get_registry()
-        assert len(registry.tools) == 16
+        assert len(registry.tools) == 22
 
 
 if __name__ == "__main__":

@@ -66,6 +66,20 @@ API_GUIDE.md
 # Local skill development (root-level only, not agentd/skills/)
 /skills/
 
+# Domain extension packages are managed in their own repos.
+/extensions/
+
+# Local benchmark/export bundles.
+/outputs/
+
+# v0.4.5 private insurance clause extension artifacts; these move to the
+# extension repo rather than the open-source AgentD main repo.
+agentd/db/alembic/versions/016_insurance_clause_library.py
+agentd/tests/test_v045_clause_import_extension.py
+agentd/tests/test_v045_clause_batch_compare_skill.py
+web/components/extensions/Clause*.tsx
+web/app/extensions/*/import/
+
 # Design reference (local only)
 AgentD-Design-Reference/
 /drafts_login_hero/

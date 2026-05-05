@@ -795,6 +795,142 @@ export interface KnowledgeImportProgress {
   updated_at: string;
 }
 
+// --- Domain Extensions (v0.4.5 / Phase C1) ---
+
+export interface DomainExtensionNav {
+  label: string;
+  href: string;
+  order?: number;
+}
+
+export interface DomainExtensionFrontend {
+  page_kind: "generic_extension";
+  page_schema_endpoint: string;
+}
+
+export interface DomainExtensionItem {
+  name: string;
+  display_name: string;
+  description?: string;
+  version: string;
+  status: "enabled" | "disabled" | "error";
+  visibility: "all" | "admin";
+  nav?: DomainExtensionNav;
+  frontend?: DomainExtensionFrontend;
+}
+
+export interface DomainExtensionsResponse {
+  extensions: DomainExtensionItem[];
+}
+
+export type ExtensionPageSchema =
+  | ExtensionInfoPanelSchema
+  | ExtensionSearchTableSchema;
+
+export interface ExtensionInfoPanelSchema {
+  kind: "info_panel";
+  title: string;
+  description?: string;
+  cards?: Array<{
+    title: string;
+    value: string | number;
+    description?: string;
+  }>;
+  actions?: Array<{
+    label: string;
+    href: string;
+    variant?: "primary" | "secondary";
+  }>;
+}
+
+export interface ExtensionSearchTableSchema {
+  kind: "search_table";
+  title: string;
+  description?: string;
+  search_placeholder?: string;
+  columns: Array<{
+    key: string;
+    label: string;
+  }>;
+  rows: Array<Record<string, string | number | boolean | null>>;
+}
+
+export type ClauseImportJobStatus =
+  | "uploaded"
+  | "running"
+  | "waiting_user"
+  | "not_importable"
+  | "extraction_failed"
+  | "extracted"
+  | "reviewing"
+  | "committing"
+  | "committed"
+  | "cancelled";
+
+export interface ClauseImportJob {
+  id: string;
+  created_by: string | null;
+  status: ClauseImportJobStatus;
+  upload_root: string;
+  artifact_root: string;
+  import_session_id: string | null;
+  agent_run_id: string | null;
+  current_phase: string | null;
+  summary: Record<string, unknown>;
+  error: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  completed_at: string | null;
+}
+
+export interface ClauseImportItem {
+  id: string;
+  job_id: string;
+  ordinal: number;
+  clause_type: "main" | "additional" | string;
+  name: string;
+  normalized_name: string;
+  category: string;
+  is_active: boolean;
+  content: string;
+  applicable_main_clauses: string[];
+  tags: string[];
+  source_ref: Record<string, unknown>;
+  metadata_json: Record<string, unknown>;
+  validation_status: "valid" | "warning" | "error" | "duplicate_blocked" | string;
+  review_status: "pending" | "approved" | "rejected" | string;
+  duplicate_name_clause_id: string | null;
+  duplicate_content_clause_id: string | null;
+  warnings: Array<{ code?: string; message?: string }>;
+  errors: Array<{ code?: string; message?: string }>;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ClauseRecord {
+  id: string;
+  clause_type: "main" | "additional" | string;
+  name: string;
+  normalized_name: string;
+  category: string;
+  is_active: boolean;
+  applicable_main_clauses: string[];
+  tags: string[];
+  source_ref: Record<string, unknown>;
+  metadata_json: Record<string, unknown>;
+  content?: string;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ClauseImportMessage {
+  id: string;
+  role: "user" | "assistant" | "tool";
+  parts: Part[];
+  seq: number;
+  created_at: string | null;
+}
+
 // --- Panel System (Phase P1) ---
 
 export type PanelType = "file_preview" | "task_output" | "html_app";

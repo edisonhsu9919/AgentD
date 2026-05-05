@@ -48,6 +48,7 @@ async def create_session(
     title: str = "New Session",
     agent_id: str = "assistant",
     parent_id: Optional[uuid.UUID] = None,
+    is_internal: bool = False,
 ) -> Session:
     resolved_agent_id = normalize_agent_id(agent_id)
     session = Session(
@@ -57,6 +58,7 @@ async def create_session(
         agent_id=resolved_agent_id,
         model_id=model_id,
         parent_id=parent_id,
+        is_internal=is_internal,
         status="idle",
         token_usage={"input": 0, "output": 0, "total": 0},
     )
@@ -81,14 +83,22 @@ async def list_sessions(
     count_q = (
         select(func.count())
         .select_from(Session)
-        .where(Session.user_id == user_id, Session.parent_id.is_(None))
+        .where(
+            Session.user_id == user_id,
+            Session.parent_id.is_(None),
+            Session.is_internal.is_(False),
+        )
     )
     total = (await db.execute(count_q)).scalar_one()
 
     # Fetch — exclude child sessions
     q = (
         select(Session)
-        .where(Session.user_id == user_id, Session.parent_id.is_(None))
+        .where(
+            Session.user_id == user_id,
+            Session.parent_id.is_(None),
+            Session.is_internal.is_(False),
+        )
         .order_by(Session.updated_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)

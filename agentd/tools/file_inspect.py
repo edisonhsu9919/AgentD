@@ -20,8 +20,8 @@ from workspace.manager import is_internal_path, validate_path
 
 logger = logging.getLogger(__name__)
 
-# Supported extensions (full extraction)
-_SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".pptx", ".eml"}
+# Supported extensions (full extraction / structural reconnaissance)
+_SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".pptx", ".eml", ".json"}
 
 # Image extensions (VLM recon)
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
@@ -44,10 +44,11 @@ class FileInspectTool(BaseTool):
     def description(self) -> str:
         return (
             "Structural reconnaissance for PDF, Office (DOCX/XLSX/PPTX), email (EML), "
-            "and image (PNG/JPG/WEBP/BMP/GIF) files. "
+            "JSON, and image (PNG/JPG/WEBP/BMP/GIF) files. "
             "ALWAYS use this as the FIRST step when encountering these file types — "
             "do NOT use file_read or bash commands on them. "
             "For documents: returns page/slide/sheet count, text density, headings, sample content. "
+            "For JSON: returns top-level type, keys, array lengths, sampled schema, and section hints without full text. "
             "For images and scanned PDFs: uses VLM to provide visual summary, text detection, "
             "and document type classification. Use the result to decide whether to "
             "proceed with full processing, load a skill, or inform the user about limitations."
@@ -126,6 +127,8 @@ class FileInspectTool(BaseTool):
             return await _inspect_pptx(abs_path, path)
         if ext == ".eml":
             return await _inspect_eml(abs_path, path)
+        if ext == ".json":
+            return await _inspect_json(abs_path, path)
 
         return {"output": f"No handler for extension: {ext}", "is_error": True}
 
@@ -259,6 +262,153 @@ async def _inspect_eml(abs_path: str, rel_path: str) -> dict[str, Any]:
     result["understanding_available"] = True
     output = json.dumps(result, indent=2, ensure_ascii=False)
     return {"output": output, "is_error": False}
+
+
+# ── JSON ────────────────────────────────────────────────────────────────────
+
+
+async def _inspect_json(abs_path: str, rel_path: str) -> dict[str, Any]:
+    """JSON structure reconnaissance without returning full long text fields."""
+    try:
+        size_bytes = os.path.getsize(abs_path)
+        with open(abs_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {"output": f"File not found: {rel_path}", "is_error": True}
+    except json.JSONDecodeError as e:
+        return {"output": f"Invalid JSON: {e}", "is_error": True}
+    except UnicodeDecodeError as e:
+        return {"output": f"JSON inspection failed: cannot decode as UTF-8: {e}", "is_error": True}
+    except Exception as e:
+        return {"output": f"JSON inspection failed: {e}", "is_error": True}
+
+    result: dict[str, Any] = {
+        "kind": "json",
+        "path": rel_path,
+        "size_bytes": size_bytes,
+        "top_level_type": _json_type_name(data),
+        "understanding_available": True,
+        "recommendation": (
+            "Use this structure summary to select a target section, then use bash/python "
+            "to extract a small task-specific JSON file instead of reading the full JSON into context."
+        ),
+    }
+
+    if isinstance(data, dict):
+        result["top_level_keys"] = list(data.keys())[:80]
+        result["top_level_key_count"] = len(data)
+        result["object_schema"] = _json_object_schema(data)
+        result["array_summaries"] = _json_array_summaries(data)
+        sections = _json_sections_summary(data)
+        if sections:
+            result["sections"] = sections
+    elif isinstance(data, list):
+        result["array_length"] = len(data)
+        result["sample_schema"] = _json_sample_schema(data[:5])
+    else:
+        result["value_preview"] = _json_scalar_preview(data)
+
+    output = json.dumps(result, indent=2, ensure_ascii=False)
+    return {"output": output, "is_error": False}
+
+
+def _json_type_name(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, (int, float)):
+        return "number"
+    return type(value).__name__
+
+
+def _json_scalar_preview(value: Any, max_chars: int = 120) -> Any:
+    if isinstance(value, str):
+        text = value.strip()
+        return text[:max_chars] + ("..." if len(text) > max_chars else "")
+    return value
+
+
+def _json_value_shape(value: Any) -> dict[str, Any]:
+    shape: dict[str, Any] = {"type": _json_type_name(value)}
+    if isinstance(value, dict):
+        shape["keys"] = list(value.keys())[:30]
+        shape["key_count"] = len(value)
+    elif isinstance(value, list):
+        shape["length"] = len(value)
+        if value:
+            shape["item_schema"] = _json_sample_schema(value[:3])
+    elif isinstance(value, str):
+        shape["char_length"] = len(value)
+        shape["preview"] = _json_scalar_preview(value, max_chars=80)
+    return shape
+
+
+def _json_object_schema(obj: dict[str, Any]) -> dict[str, Any]:
+    return {key: _json_value_shape(value) for key, value in list(obj.items())[:40]}
+
+
+def _json_sample_schema(items: list[Any]) -> dict[str, Any]:
+    types = sorted({_json_type_name(item) for item in items})
+    schema: dict[str, Any] = {"sample_size": len(items), "item_types": types}
+    object_items = [item for item in items if isinstance(item, dict)]
+    if object_items:
+        keys: dict[str, int] = {}
+        for item in object_items:
+            for key in item:
+                keys[key] = keys.get(key, 0) + 1
+        schema["object_keys"] = sorted(keys)[:60]
+        schema["object_key_frequency"] = dict(sorted(keys.items())[:60])
+        schema["first_object_schema"] = _json_object_schema(object_items[0])
+    return schema
+
+
+def _json_array_summaries(obj: dict[str, Any]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for key, value in obj.items():
+        if not isinstance(value, list):
+            continue
+        summary: dict[str, Any] = {
+            "path": key,
+            "length": len(value),
+            "sample_schema": _json_sample_schema(value[:5]),
+        }
+        summaries.append(summary)
+    return summaries[:20]
+
+
+def _json_sections_summary(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, dict):
+        return []
+    sections = data.get("sections")
+    if not isinstance(sections, list):
+        return []
+
+    summary: list[dict[str, Any]] = []
+    for index, section in enumerate(sections[:80], start=1):
+        if not isinstance(section, dict):
+            summary.append({"index": index, "type": _json_type_name(section)})
+            continue
+        entry: dict[str, Any] = {"index": index}
+        for name_key in ("section_name", "name", "title", "险种", "category"):
+            if section.get(name_key):
+                entry["section_name"] = str(section.get(name_key))
+                break
+        for clauses_key in ("corrected_clauses", "clauses", "items", "条款"):
+            value = section.get(clauses_key)
+            if isinstance(value, list):
+                entry[f"{clauses_key}_count"] = len(value)
+                if value and isinstance(value[0], dict):
+                    entry[f"{clauses_key}_sample_keys"] = list(value[0].keys())[:30]
+                break
+        summary.append(entry)
+    return summary
 
 
 # ── Image ──────────────────────────────────────────────────────────────────

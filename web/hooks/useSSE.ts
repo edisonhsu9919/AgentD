@@ -407,7 +407,7 @@ export function useSSE(sessionId: string | null) {
       fetchMessages(sessionId);
       fetchTaskPlan(sessionId);
     }
-  }, [sessionId, fetchRuntime, clearBuffer, clearStreaming, clearPendingPermissions, fetchMessages, fetchSessions, fetchTree, fetchTaskPlan]);
+  }, [sessionId, fetchRuntime, clearBuffer, clearStreaming, clearPendingPermissions, fetchMessages, fetchSessions, fetchTree, fetchTaskPlan, fetchTasksFromAPI]);
 
   useEffect(() => {
     if (!sessionId) return;

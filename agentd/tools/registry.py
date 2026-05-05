@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from langchain_core.tools import StructuredTool, ToolException
 from pydantic import create_model
@@ -18,13 +18,38 @@ _JSON_TYPE_MAP = {
 }
 
 
+def _schema_property_to_type(prop_def: dict) -> Any:
+    if prop_def.get("x-agentd-python-type") == "any":
+        return Any
+
+    any_of = prop_def.get("anyOf")
+    if isinstance(any_of, list) and any_of:
+        types: list[Any] = []
+        for item in any_of:
+            if not isinstance(item, dict):
+                continue
+            json_type = item.get("type")
+            if json_type == "null":
+                continue
+            py_type = _JSON_TYPE_MAP.get(json_type, str)
+            if py_type not in types:
+                types.append(py_type)
+        if not types:
+            return Any
+        if len(types) == 1:
+            return types[0]
+        return Union[tuple(types)]
+
+    return _JSON_TYPE_MAP.get(prop_def.get("type", "string"), str)
+
+
 def _schema_to_pydantic(name: str, schema: dict) -> type:
     """Convert a JSON Schema dict to a Pydantic model class."""
     properties = schema.get("properties", {})
     required = set(schema.get("required", []))
     fields: dict[str, Any] = {}
     for prop_name, prop_def in properties.items():
-        py_type = _JSON_TYPE_MAP.get(prop_def.get("type", "string"), str)
+        py_type = _schema_property_to_type(prop_def)
         if prop_name in required:
             fields[prop_name] = (py_type, ...)
         else:
@@ -485,3 +510,24 @@ def _register_defaults(registry: ToolRegistry) -> None:
     registry.register(KnowledgeCatalogTool())
     registry.register(KnowledgeSearchTool())
     registry.register(KnowledgeReadTool())
+    _register_extension_tools(registry)
+
+
+def _register_extension_tools(registry: ToolRegistry) -> None:
+    """Register tools provided by enabled domain extensions."""
+    try:
+        from extensions.registry import get_extension_registry, get_loaded_extension_tools
+
+        extension_registry = get_extension_registry()
+        for loaded in get_loaded_extension_tools():
+            tool = loaded.tool
+            if tool.name in registry.tools:
+                extension_registry.mark_error(
+                    loaded.extension_name,
+                    f"extension tool name conflicts with core tool: {tool.name}",
+                )
+                continue
+            registry.register(tool)
+    except Exception as exc:
+        # Extension loading must not prevent core tools from being available.
+        print(f"[extensions] failed to register extension tools: {type(exc).__name__}: {exc}")

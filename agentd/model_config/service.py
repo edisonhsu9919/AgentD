@@ -276,9 +276,14 @@ async def resolve_active_model_config(db: AsyncSession) -> ResolvedModelConfig:
       2. Environment variable fallback (settings.*)
 
     context_window priority:
-      1. Provider /models API discovery (live truth)
-      2. DB model_configs.context_window (manual override)
+      1. DB model_configs.context_window (manual runtime cap)
+      2. Provider /models API discovery (best-effort fallback)
       3. settings.context_window_tokens (env fallback)
+
+    The DB value is intentionally treated as the runtime cap when present.
+    Some providers expose a model's training window (for example
+    llama.cpp's meta.n_ctx_train) rather than the currently served context
+    size, and using that value would delay compaction past the real limit.
     """
     result = await db.execute(
         select(ModelConfig).where(
@@ -290,12 +295,13 @@ async def resolve_active_model_config(db: AsyncSession) -> ResolvedModelConfig:
     mc = result.scalar_one_or_none()
 
     if mc:
-        # Manual fallback: DB config > env setting
-        manual_cw = mc.context_window or settings.context_window_tokens
-        # Try provider discovery first (best-effort)
-        discovered_cw = await discover_provider_context_window(
-            mc.base_url, mc.model_id, mc.api_key,
-        )
+        if mc.context_window:
+            resolved_cw = mc.context_window
+        else:
+            discovered_cw = await discover_provider_context_window(
+                mc.base_url, mc.model_id, mc.api_key,
+            )
+            resolved_cw = discovered_cw or settings.context_window_tokens
         return ResolvedModelConfig(
             source="db_default",
             name=mc.name,
@@ -307,7 +313,7 @@ async def resolve_active_model_config(db: AsyncSession) -> ResolvedModelConfig:
             capabilities=mc.capabilities,
             timeout_seconds=mc.timeout_seconds,
             extra_params=mc.extra_params,
-            context_window=discovered_cw or manual_cw,
+            context_window=resolved_cw,
         )
 
     # Env fallback path
@@ -353,10 +359,13 @@ async def resolve_model_config_for_model_id(
     mc = result.scalar_one_or_none()
 
     if mc:
-        manual_cw = mc.context_window or settings.context_window_tokens
-        discovered_cw = await discover_provider_context_window(
-            mc.base_url, mc.model_id, mc.api_key,
-        )
+        if mc.context_window:
+            resolved_cw = mc.context_window
+        else:
+            discovered_cw = await discover_provider_context_window(
+                mc.base_url, mc.model_id, mc.api_key,
+            )
+            resolved_cw = discovered_cw or settings.context_window_tokens
         return ResolvedModelConfig(
             source="db_model_id",
             name=mc.name,
@@ -368,7 +377,7 @@ async def resolve_model_config_for_model_id(
             capabilities=mc.capabilities,
             timeout_seconds=mc.timeout_seconds,
             extra_params=mc.extra_params,
-            context_window=discovered_cw or manual_cw,
+            context_window=resolved_cw,
         )
 
     if requested == settings.default_model_id:

@@ -30,6 +30,16 @@ _AGENT_ALIASES = {
     "build": "assistant",
 }
 
+_MINIMAL_TASK_RULES = """## Minimal Task Agent Rules
+
+- Stay inside the session workspace.
+- Use only the tools granted to this task.
+- Preserve source text exactly when extracting structured data.
+- Do not produce user-facing prose unless the task requires an artifact.
+- Finish by producing the required artifact and calling the required ingest or commit tool.
+- If source files are unrelated or unreadable, write a clear structured failure artifact instead of improvising.
+"""
+
 
 def _load_runtime_header(
     agent_id: str,
@@ -79,11 +89,32 @@ def _load_role_prompt(agent_id: str) -> str:
     legacy_path = PROMPT_DIR / f"{resolved_agent_id}.md"
     if legacy_path.exists():
         return legacy_path.read_text(encoding="utf-8")
+    try:
+        profile = _get_extension_agent_profile(resolved_agent_id)
+        if profile:
+            return profile.content
+    except Exception:
+        pass
     # Ultimate fallback to assistant role
     fallback = PROMPT_DIR / "roles" / "assistant.md"
     if fallback.exists():
         return fallback.read_text(encoding="utf-8")
     return ""
+
+
+def _get_extension_agent_profile(agent_id: str):
+    try:
+        from extensions.registry import get_extension_agent_profile
+        return get_extension_agent_profile(agent_id)
+    except Exception:
+        return None
+
+
+def _get_agent_prompt_mode(agent_id: str) -> str:
+    profile = _get_extension_agent_profile(agent_id)
+    if profile:
+        return profile.prompt_mode
+    return "standard"
 
 
 def _load_rules_layer() -> str:
@@ -191,6 +222,32 @@ def _load_skills_metadata_layer(loaded_skills: list[dict] | None) -> str:
         "Use `skill list` only for explicit discovery or troubleshooting."
     )
     return "\n".join(lines)
+
+
+def _load_domain_extensions_metadata_layer() -> tuple[str, list[str]]:
+    """Layer 4.5: enabled domain extension routing hints."""
+    try:
+        from extensions.registry import get_extension_prompt_fragments
+    except Exception:
+        return "", []
+
+    fragments = get_extension_prompt_fragments()
+    if not fragments:
+        return "", []
+    lines = ["## Domain Extensions Metadata", "", "<domain_extensions>"]
+    names: list[str] = []
+    for fragment in fragments:
+        content = fragment.content.strip()
+        if not content:
+            continue
+        names.append(fragment.extension_name)
+        lines.append(f'  <extension name="{fragment.extension_name}">')
+        lines.append(content)
+        lines.append("  </extension>")
+    lines.append("</domain_extensions>")
+    if not names:
+        return "", []
+    return "\n".join(lines), names
 
 
 def _has_compaction_occurred(session_dir: str) -> bool:
@@ -324,6 +381,16 @@ def build_system_prompt(
     layer_sizes: dict[str, int] = {}
     effective_workspace = workspace_dir or session_dir
     resolved_agent_id = _resolve_agent_id(agent_id)
+    prompt_mode = _get_agent_prompt_mode(resolved_agent_id)
+    if prompt_mode == "minimal_task":
+        return _build_minimal_task_prompt(
+            resolved_agent_id,
+            session_dir,
+            effective_workspace,
+            user_root,
+            model_id,
+            session_id,
+        )
 
     # Layer 1: Role Prompt (identity — "who you are")
     role = _load_role_prompt(resolved_agent_id)
@@ -355,6 +422,12 @@ def build_system_prompt(
         layers.append(skills)
     layer_sizes["skills"] = len(skills) if skills else 0
 
+    # Layer 4.5: Domain Extensions Metadata (enabled extension routing hints)
+    extensions_layer, enabled_extension_names = _load_domain_extensions_metadata_layer()
+    if extensions_layer:
+        layers.append(extensions_layer)
+    layer_sizes["domain_extensions"] = len(extensions_layer) if extensions_layer else 0
+
     # Layer 5: Task Plan (compact-after fallback — Phase N2-1)
     task_plan = ""
     if _has_compaction_occurred(session_dir):
@@ -380,6 +453,7 @@ def build_system_prompt(
         {"name": "rules", "chars": layer_sizes["rules"], "injected": layer_sizes["rules"] > 0},
         {"name": "header", "chars": layer_sizes["header"], "injected": True},
         {"name": "skills", "chars": layer_sizes["skills"], "injected": bool(skills)},
+        {"name": "domain_extensions", "chars": layer_sizes["domain_extensions"], "injected": bool(extensions_layer)},
         {"name": "task_plan", "chars": layer_sizes["task_plan"], "injected": layer_sizes["task_plan"] > 0},
         {"name": "compaction_context", "chars": layer_sizes["compaction_context"], "injected": bool(compaction_ctx)},
     ]
@@ -387,21 +461,86 @@ def build_system_prompt(
     diagnostics = {
         "system_prompt_chars": len(prompt),
         "system_prompt_layers": layer_sizes,
+        "prompt_mode": prompt_mode,
         "prompt_assembly_order": prompt_assembly_order,
         "task_plan_injected": layer_sizes["task_plan"] > 0,
         "task_plan_chars": layer_sizes["task_plan"],
         "skills_injected": bool(skills),
         "skills_count": len(loaded_skills) if loaded_skills else 0,
+        "extensions_injected": bool(extensions_layer),
+        "extensions_enabled": enabled_extension_names,
+        "extensions_prompt_chars": layer_sizes["domain_extensions"],
         "compaction_context_injected": bool(compaction_ctx),
     }
 
     return prompt, diagnostics
 
 
+def _build_minimal_task_prompt(
+    resolved_agent_id: str,
+    session_dir: str,
+    workspace_dir: str,
+    user_root: str,
+    model_id: str,
+    session_id: str,
+) -> tuple[str, dict]:
+    role = _load_role_prompt(resolved_agent_id)
+    header = _load_runtime_header(
+        resolved_agent_id,
+        session_dir,
+        workspace_dir,
+        user_root,
+        model_id,
+        session_id,
+    )
+    minimal_rules = _MINIMAL_TASK_RULES.strip()
+    layers = [layer for layer in (role, header, minimal_rules) if layer]
+    prompt = "\n\n---\n\n".join(layers)
+    profile = _get_extension_agent_profile(resolved_agent_id)
+    extension_name = profile.extension_name if profile else ""
+    layer_sizes = {
+        "role": len(role) if role else 0,
+        "rules": len(minimal_rules),
+        "header": len(header),
+        "skills": 0,
+        "domain_extensions": 0,
+        "task_plan": 0,
+        "compaction_context": 0,
+    }
+    prompt_assembly_order = [
+        {"name": "role", "chars": layer_sizes["role"], "injected": layer_sizes["role"] > 0},
+        {"name": "header", "chars": layer_sizes["header"], "injected": True},
+        {"name": "minimal_task_rules", "chars": layer_sizes["rules"], "injected": True},
+    ]
+    diagnostics = {
+        "system_prompt_chars": len(prompt),
+        "system_prompt_layers": layer_sizes,
+        "prompt_mode": "minimal_task",
+        "prompt_assembly_order": prompt_assembly_order,
+        "task_plan_injected": False,
+        "task_plan_chars": 0,
+        "skills_injected": False,
+        "skills_count": 0,
+        "extensions_injected": False,
+        "extensions_enabled": [extension_name] if extension_name else [],
+        "extensions_prompt_chars": 0,
+        "compaction_context_injected": False,
+    }
+    return prompt, diagnostics
+
+
 def _debug_prompt_layers(agent_id: str, layers: list[str]) -> None:
     """Print prompt layer summary when DEBUG=true."""
     total = sum(len(l) for l in layers)
-    names = ["Role Prompt", "Rules", "Runtime Header", "Skills Metadata", "Task Plan (fallback)", "Compaction Context"]
+    names = [
+        "Role Prompt",
+        "Rules",
+        "Runtime Header",
+        "Skills Metadata",
+        "Domain Extensions Metadata",
+        "Task Plan (fallback)",
+        "Compaction Context",
+    ]
     print(f"[prompt] agent={agent_id} layers={len(layers)} chars={total}")
     for i, layer in enumerate(layers):
         label = names[i] if i < len(names) else f"Layer {i}"

@@ -295,9 +295,9 @@ class TestLaunchSubagentMetadata:
 
 
 class TestRegistryP3:
-    def test_tool_count_is_13(self):
+    def test_tool_count_is_22(self):
         registry = get_registry()
-        assert len(registry.tools) == 16
+        assert len(registry.tools) == 22
 
     def test_new_tools_registered(self):
         registry = get_registry()
@@ -383,7 +383,7 @@ class TestRegistryP3:
         registry = get_registry()
         ctx = _make_ctx("/tmp/fake")
         full_tools = registry.get_langchain_tools(ctx, tool_profile=None)
-        assert len(full_tools) == 16
+        assert len(full_tools) == 22
 
 
 # ── SessionTask ORM model ───────────────────────────────────────────────
@@ -446,7 +446,7 @@ class TestORMFKResolution:
 class TestMigration014:
     def test_expected_schema_version(self):
         from main import EXPECTED_SCHEMA_VERSION
-        assert EXPECTED_SCHEMA_VERSION == "015"
+        assert EXPECTED_SCHEMA_VERSION == "016"
 
     def test_migration_file_exists(self):
         from pathlib import Path
