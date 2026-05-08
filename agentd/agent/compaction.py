@@ -252,13 +252,13 @@ async def generate_summary(
             "# Worklog\n(empty)\n"
         )
 
-    from model_config.service import resolve_active_model_config
+    from model_config.service import resolve_model_config_for_model_id
 
     async with AsyncSessionLocal() as db:
-        resolved = await resolve_active_model_config(db)
+        resolved = await resolve_model_config_for_model_id(db, model_id)
 
     llm = ChatOpenAI(
-        model=model_id,
+        model=resolved.model_id,
         base_url=resolved.base_url,
         api_key=resolved.api_key,
         streaming=False,

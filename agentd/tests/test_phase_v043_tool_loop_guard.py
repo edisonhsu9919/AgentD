@@ -179,24 +179,35 @@ class TestToolLoopCircuitBreaker:
         worker._publish = AsyncMock()
 
         db = AsyncMock()
+        db.get.return_value = SimpleNamespace(diagnostics={})
         session_ctx = AsyncMock()
         session_ctx.__aenter__.return_value = db
         session_ctx.__aexit__.return_value = False
 
+        from agent.auto_recovery import AutoRecoveryResult
+
         with (
             patch("agent.worker.AsyncSessionLocal", return_value=session_ctx),
             patch("agent.worker.scheduler.mark_failed", new=AsyncMock()) as mock_mark_failed,
-            patch("agent.executor._update_db_status", new=AsyncMock()) as mock_update_status,
+            patch("agent.runtime_recovery.scheduler.update_diagnostics", new=AsyncMock()) as mock_update_diag,
+            patch("agent.runtime_recovery.session_svc.update_session_status", new=AsyncMock()) as mock_update_status,
+            patch("agent.auto_recovery.attempt_auto_recovery", new=AsyncMock(return_value=AutoRecoveryResult(False))),
         ):
             await worker._execute_run(run_id, session_id, "start", {})
 
         mock_mark_failed.assert_awaited_once()
-        mock_update_status.assert_awaited_once_with(session_id, "idle")
+        mock_update_status.assert_awaited_once_with(
+            mock_update_status.await_args.args[0],
+            uuid.UUID(session_id),
+            "idle",
+        )
+        diagnostics = mock_update_diag.await_args.args[2]
+        assert diagnostics["recovery_envelope"]["category"] == "tool_loop_breaker"
         status_event = worker._publish.await_args_list[0].args[1]
-        error_event = worker._publish.await_args_list[1].args[1]
+        error_event = worker._publish.await_args_list[3].args[1]
 
         assert status_event == {"event": "status_change", "status": "idle"}
-        assert error_event["code"] == "tool_loop_circuit_breaker"
+        assert error_event["code"] == "tool_loop_breaker"
         assert error_event["tool_name"] == "skill"
         assert error_event["canonical_args"] == {"action": "load"}
         assert error_event["identical_call_count"] == 7
@@ -223,24 +234,35 @@ class TestToolLoopCircuitBreaker:
         worker._publish = AsyncMock()
 
         db = AsyncMock()
+        db.get.return_value = SimpleNamespace(diagnostics={})
         session_ctx = AsyncMock()
         session_ctx.__aenter__.return_value = db
         session_ctx.__aexit__.return_value = False
 
+        from agent.auto_recovery import AutoRecoveryResult
+
         with (
             patch("agent.worker.AsyncSessionLocal", return_value=session_ctx),
             patch("agent.worker.scheduler.mark_failed", new=AsyncMock()) as mock_mark_failed,
-            patch("agent.executor._update_db_status", new=AsyncMock()) as mock_update_status,
+            patch("agent.runtime_recovery.scheduler.update_diagnostics", new=AsyncMock()) as mock_update_diag,
+            patch("agent.runtime_recovery.session_svc.update_session_status", new=AsyncMock()) as mock_update_status,
+            patch("agent.auto_recovery.attempt_auto_recovery", new=AsyncMock(return_value=AutoRecoveryResult(False))),
         ):
             await worker._execute_run(run_id, session_id, "resume", {"decisions": []})
 
         mock_mark_failed.assert_awaited_once()
-        mock_update_status.assert_awaited_once_with(session_id, "idle")
+        mock_update_status.assert_awaited_once_with(
+            mock_update_status.await_args.args[0],
+            uuid.UUID(session_id),
+            "idle",
+        )
+        diagnostics = mock_update_diag.await_args.args[2]
+        assert diagnostics["recovery_envelope"]["category"] == "provider_transient"
         status_event = worker._publish.await_args_list[0].args[1]
-        error_event = worker._publish.await_args_list[1].args[1]
+        error_event = worker._publish.await_args_list[3].args[1]
 
         assert status_event == {"event": "status_change", "status": "idle"}
-        assert error_event["code"] == "provider_timeout_retryable"
+        assert error_event["code"] == "provider_transient"
         assert error_event["message"].startswith("ReadTimeout:")
 
     @pytest.mark.asyncio

@@ -523,8 +523,12 @@ class TestGenerateSummary:
             mock_db_ctx.return_value.__aenter__ = AsyncMock(return_value=mock_db)
             mock_db_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            with patch("model_config.service.resolve_active_model_config", new_callable=AsyncMock) as mock_resolve:
-                mock_resolve.return_value = MagicMock(base_url="http://test", api_key="key")
+            with patch("model_config.service.resolve_model_config_for_model_id", new_callable=AsyncMock) as mock_resolve:
+                mock_resolve.return_value = MagicMock(
+                    base_url="http://test",
+                    api_key="key",
+                    model_id="summary-model",
+                )
 
                 mock_llm = AsyncMock()
                 mock_llm.ainvoke.return_value = mock_result
@@ -536,6 +540,7 @@ class TestGenerateSummary:
                 assert "# Current State" in result
                 assert "rename PDFs" in result
                 assert mock_llm.ainvoke.call_count == 1
+                assert mock_llm_cls.call_args.kwargs["model"] == "summary-model"
 
     @pytest.mark.asyncio
     async def test_retry_on_invalid_first_attempt(self):
@@ -558,8 +563,12 @@ class TestGenerateSummary:
             mock_db_ctx.return_value.__aenter__ = AsyncMock(return_value=mock_db)
             mock_db_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            with patch("model_config.service.resolve_active_model_config", new_callable=AsyncMock) as mock_resolve:
-                mock_resolve.return_value = MagicMock(base_url="http://test", api_key="key")
+            with patch("model_config.service.resolve_model_config_for_model_id", new_callable=AsyncMock) as mock_resolve:
+                mock_resolve.return_value = MagicMock(
+                    base_url="http://test",
+                    api_key="key",
+                    model_id="summary-model",
+                )
 
                 mock_llm = AsyncMock()
                 mock_llm.ainvoke.side_effect = [bad_result, good_result]
@@ -583,8 +592,12 @@ class TestGenerateSummary:
             mock_db_ctx.return_value.__aenter__ = AsyncMock(return_value=mock_db)
             mock_db_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            with patch("model_config.service.resolve_active_model_config", new_callable=AsyncMock) as mock_resolve:
-                mock_resolve.return_value = MagicMock(base_url="http://test", api_key="key")
+            with patch("model_config.service.resolve_model_config_for_model_id", new_callable=AsyncMock) as mock_resolve:
+                mock_resolve.return_value = MagicMock(
+                    base_url="http://test",
+                    api_key="key",
+                    model_id="summary-model",
+                )
 
                 mock_llm = AsyncMock()
                 mock_llm.ainvoke.return_value = bad_result

@@ -215,6 +215,25 @@ class AgentWorker:
             # Mark completed
             async with AsyncSessionLocal() as db:
                 await scheduler.mark_completed(db, run_id)
+                auto_recovery_payload = (
+                    payload.get("auto_recovery")
+                    if isinstance(payload, dict) and isinstance(payload.get("auto_recovery"), dict)
+                    else None
+                )
+                source_run_id = (
+                    auto_recovery_payload.get("source_run_id")
+                    if isinstance(auto_recovery_payload, dict)
+                    else None
+                )
+                if source_run_id:
+                    from agent.runtime_recovery import mark_recovery_resolved
+
+                    await mark_recovery_resolved(
+                        db,
+                        source_run_id=uuid.UUID(str(source_run_id)),
+                        resolved_by_run_id=run_id,
+                        resolution="auto_recovery_completed",
+                    )
                 await db.commit()
 
             try:
@@ -245,36 +264,102 @@ class AgentWorker:
             if settings.debug:
                 traceback.print_exc()
 
+            auto_payload = (
+                payload.get("auto_recovery")
+                if isinstance(payload, dict) and isinstance(payload.get("auto_recovery"), dict)
+                else {}
+            )
+            from agent.runtime_recovery import finalize_run_failure
+
             async with AsyncSessionLocal() as db:
-                await scheduler.mark_failed(db, run_id, error_msg)
+                envelope = await finalize_run_failure(
+                    db,
+                    session_id=uuid.UUID(session_id),
+                    run_id=run_id,
+                    exc=e,
+                    run_type=run_type,
+                    context={
+                        "worker_id": self.worker_id,
+                        "payload_keys": sorted(payload.keys()) if isinstance(payload, dict) else [],
+                        "auto_recovery_attempted": (
+                            payload.get("auto_recovery_attempted")
+                            if isinstance(payload, dict)
+                            else None
+                        )
+                        or auto_payload.get("attempted"),
+                    },
+                )
                 await db.commit()
 
-            from agent.executor import _update_db_status
+            from agent.auto_recovery import AutoRecoveryResult, attempt_auto_recovery
+
+            try:
+                async with AsyncSessionLocal() as db:
+                    auto_recovery_result = await attempt_auto_recovery(
+                        db,
+                        session_id=uuid.UUID(session_id),
+                        failed_run_id=run_id,
+                        envelope=envelope,
+                        publish=self._publish,
+                    )
+                    await db.commit()
+            except Exception as recovery_exc:
+                auto_recovery_result = AutoRecoveryResult(
+                    attempted=True,
+                    enqueued=False,
+                    reason=f"auto_recovery_error:{type(recovery_exc).__name__}",
+                    diagnostics={"error": str(recovery_exc)},
+                )
+                if settings.debug:
+                    traceback.print_exc()
+
             from tools.registry import ToolLoopCircuitBreaker
             is_subtask_continuation = (
                 run_type == "start" and payload.get("is_subtask_continuation", False)
             )
             is_tool_loop_breaker = isinstance(e, ToolLoopCircuitBreaker)
             is_recoverable_provider_timeout = isinstance(e, RecoverableProviderTimeout)
-            next_status = "idle" if (
-                is_subtask_continuation
-                or is_tool_loop_breaker
-                or is_recoverable_provider_timeout
-            ) else "error"
-            await _update_db_status(session_id, next_status)
+            next_status = (
+                "queued"
+                if auto_recovery_result.enqueued
+                else "error"
+                if envelope.severity == "terminal"
+                else "idle"
+            )
             await self._publish(session_id, {"event": "status_change", "status": next_status})
+            recovery_event = {
+                "event": "run_failed_terminal" if envelope.severity == "terminal" else "run_failed_recoverable",
+                "run_id": str(run_id),
+                "old_state": "none",
+                "new_state": "auto_recovering" if auto_recovery_result.enqueued else envelope.recovery_state,
+                "category": envelope.category,
+                "next_action": "auto_recovering" if auto_recovery_result.enqueued else envelope.next_action,
+                "user_message": envelope.user_message,
+                "recovery_envelope": envelope.model_dump(mode="json"),
+                "auto_recovery": {
+                    "attempted": auto_recovery_result.attempted,
+                    "enqueued": auto_recovery_result.enqueued,
+                    "run_id": str(auto_recovery_result.run_id) if auto_recovery_result.run_id else None,
+                    "strategy": auto_recovery_result.strategy,
+                    "reason": auto_recovery_result.reason,
+                },
+            }
+            await self._publish(session_id, recovery_event)
+            await self._publish(session_id, {
+                "event": "recovery_state_changed",
+                "run_id": str(run_id),
+                "old_state": "none",
+                "new_state": "auto_recovering" if auto_recovery_result.enqueued else envelope.recovery_state,
+                "category": envelope.category,
+                "next_action": "auto_recovering" if auto_recovery_result.enqueued else envelope.next_action,
+                "user_message": envelope.user_message,
+            })
             await self._publish(session_id, {
                 "event": "error",
-                "code": (
-                    "tool_loop_circuit_breaker"
-                    if is_tool_loop_breaker
-                    else "provider_timeout_retryable"
-                    if is_recoverable_provider_timeout
-                    else "subtask_continuation_error"
-                    if is_subtask_continuation
-                    else "worker_error"
-                ),
+                "code": envelope.category,
                 "message": error_msg,
+                "recovery_state": envelope.recovery_state,
+                "next_action": envelope.next_action,
                 **({
                     "tool_name": e.tool_name,
                     "canonical_args": e.canonical_args,
@@ -671,6 +756,7 @@ class AgentWorker:
             publish=self._publish,
             check_abort=check_abort,
             run_id=str(run_id),
+            payload=payload,
         )
 
     async def _execute_abort(self, session_id: str, run_id: uuid.UUID) -> None:
@@ -710,6 +796,7 @@ class AgentWorker:
         5. Set parent from subtask_waiting → queued
         """
         parent_session_id: str | None = None
+        parent_continuation_run_id: uuid.UUID | None = None
         try:
             from agent.subtask_bridge import bridge_reconcilable_child_tasks
 
@@ -967,6 +1054,7 @@ class AgentWorker:
                         "is_subtask_continuation": True,
                     },
                 )
+                parent_continuation_run_id = run.id
 
                 # 5. Set parent status to queued
                 await db.execute(
@@ -997,16 +1085,66 @@ class AgentWorker:
                 traceback.print_exc()
             if parent_session_id:
                 try:
-                    from agent.executor import _update_db_status
-                    await _update_db_status(parent_session_id, "error")
+                    from agent.runtime_error_classifier import RuntimeErrorClassifier
+                    from agent.runtime_recovery import persist_session_recovery_envelope
+
+                    envelope = RuntimeErrorClassifier.classify_exception(
+                        e,
+                        run_type="subtask_bridge",
+                        context={
+                            "child_session_id": child_session_id,
+                            "source": "subtask",
+                            "bridge_child_session_id": child_session_id,
+                            "bridge_failure_without_run_id": parent_continuation_run_id is None,
+                        },
+                    )
+                    async with AsyncSessionLocal() as db:
+                        persisted_run_id = await persist_session_recovery_envelope(
+                            db,
+                            session_id=uuid.UUID(parent_session_id),
+                            run_id=parent_continuation_run_id,
+                            envelope=envelope,
+                            extra_diagnostics={
+                                "source": "subtask",
+                                "bridge_child_session_id": child_session_id,
+                                "bridge_failure_without_run_id": parent_continuation_run_id is None,
+                            },
+                        )
+                        await db.commit()
+                    run_id_text = str(persisted_run_id) if persisted_run_id else None
                     await self._publish(parent_session_id, {
                         "event": "status_change",
-                        "status": "error",
+                        "status": "idle",
+                    })
+                    await self._publish(parent_session_id, {
+                        "event": "run_failed_recoverable",
+                        "run_id": run_id_text,
+                        "persisted": persisted_run_id is not None,
+                        "persistence_reason": None if persisted_run_id else "no_target_run",
+                        "old_state": "none",
+                        "new_state": envelope.recovery_state,
+                        "category": envelope.category,
+                        "next_action": envelope.next_action,
+                        "user_message": envelope.user_message,
+                        "recovery_envelope": envelope.model_dump(mode="json"),
+                    })
+                    await self._publish(parent_session_id, {
+                        "event": "recovery_state_changed",
+                        "run_id": run_id_text,
+                        "persisted": persisted_run_id is not None,
+                        "persistence_reason": None if persisted_run_id else "no_target_run",
+                        "old_state": "none",
+                        "new_state": envelope.recovery_state,
+                        "category": envelope.category,
+                        "next_action": envelope.next_action,
+                        "user_message": envelope.user_message,
                     })
                     await self._publish(parent_session_id, {
                         "event": "error",
-                        "code": "subtask_bridge_checkpoint_invalid",
+                        "code": envelope.category,
                         "message": str(e),
+                        "recovery_state": envelope.recovery_state,
+                        "next_action": envelope.next_action,
                     })
                 except Exception:
                     if settings.debug:

@@ -261,9 +261,13 @@ class TestRuntimeEndpoint:
         }
         failed_run = MagicMock()
         failed_run.error = "subtask continuation failed"
+        failed_run.run_type = "start"
+        failed_run.status = "failed"
+        failed_run.diagnostics = {}
         count_result = MagicMock()
         count_result.scalar_one.return_value = 0
         db.execute = AsyncMock(side_effect=[
+            MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
             MagicMock(scalar_one_or_none=MagicMock(return_value=diag_run)),
             MagicMock(scalar_one_or_none=MagicMock(return_value=failed_run)),
             count_result,
@@ -314,11 +318,13 @@ class TestRuntimeEndpoint:
         }
         failed_run = MagicMock()
         failed_run.status = "failed"
+        failed_run.run_type = "start"
         failed_run.error = "RuntimeIntegrityError: stale projection"
         failed_run.diagnostics = diag_run.diagnostics
         count_result = MagicMock()
         count_result.scalar_one.return_value = 0
         db.execute = AsyncMock(side_effect=[
+            MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
             MagicMock(scalar_one_or_none=MagicMock(return_value=diag_run)),
             MagicMock(scalar_one_or_none=MagicMock(return_value=failed_run)),
             count_result,

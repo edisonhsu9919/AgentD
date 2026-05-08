@@ -46,6 +46,12 @@ def _closed_tool_result_snapshot():
     ])
 
 
+def _provider_ready_snapshot():
+    return _snapshot([
+        HumanMessage(content="please continue after compact"),
+    ])
+
+
 def _invalid_snapshot():
     return _snapshot([
         HumanMessage(content="run"),
@@ -67,7 +73,7 @@ def _hitl_snapshot():
     )
 
 
-async def _run_execute_continue(monkeypatch, tmp_path, snapshot):
+async def _run_execute_continue(monkeypatch, tmp_path, snapshot, *, payload=None):
     from agent import executor
 
     session_id = str(uuid.uuid4())
@@ -96,6 +102,7 @@ async def _run_execute_continue(monkeypatch, tmp_path, snapshot):
         publish=AsyncMock(),
         check_abort=AsyncMock(return_value=False),
         run_id="run-1",
+        payload=payload,
     )
     return execute_graph
 
@@ -131,6 +138,64 @@ async def test_execute_continue_rejects_open_hitl_checkpoint(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_execute_continue_allows_reactive_context_overflow_provider_ready(
+    monkeypatch,
+    tmp_path,
+):
+    payload = {
+        "mode": "retry_model_node",
+        "source_run_id": str(uuid.uuid4()),
+        "auto_recovery": {
+            "category": "provider_context_overflow",
+            "strategy": "reactive_compact_then_continue",
+            "attempted": 1,
+        },
+    }
+    execute_graph = await _run_execute_continue(
+        monkeypatch,
+        tmp_path,
+        _provider_ready_snapshot(),
+        payload=payload,
+    )
+
+    execute_graph.assert_awaited_once()
+    assert execute_graph.await_args.args[1] is None
+    assert execute_graph.await_args.kwargs["skip_pre_microcompact"] is True
+
+
+@pytest.mark.asyncio
+async def test_execute_continue_rejects_plain_provider_ready_without_reactive_context(
+    monkeypatch,
+    tmp_path,
+):
+    with pytest.raises(RuntimeError, match="provider_ready"):
+        await _run_execute_continue(monkeypatch, tmp_path, _provider_ready_snapshot())
+
+
+@pytest.mark.asyncio
+async def test_execute_continue_rejects_provider_ready_with_open_tool_group(
+    monkeypatch,
+    tmp_path,
+):
+    payload = {
+        "mode": "retry_model_node",
+        "source_run_id": str(uuid.uuid4()),
+        "auto_recovery": {
+            "category": "provider_context_overflow",
+            "strategy": "reactive_compact_then_continue",
+            "attempted": 1,
+        },
+    }
+    with pytest.raises(RuntimeError, match="not retryable"):
+        await _run_execute_continue(
+            monkeypatch,
+            tmp_path,
+            _hitl_snapshot(),
+            payload=payload,
+        )
+
+
+@pytest.mark.asyncio
 async def test_worker_rejects_continue_payload_without_source_run_id():
     from agent.worker import AgentWorker
 
@@ -141,3 +206,32 @@ async def test_worker_rejects_continue_payload_without_source_run_id():
             uuid.uuid4(),
             {"mode": "retry_model_node"},
         )
+
+
+@pytest.mark.asyncio
+async def test_worker_passes_continue_payload_to_executor():
+    from agent.worker import AgentWorker
+
+    payload = {
+        "mode": "retry_model_node",
+        "source_run_id": str(uuid.uuid4()),
+        "auto_recovery": {
+            "category": "provider_context_overflow",
+            "strategy": "reactive_compact_then_continue",
+        },
+    }
+    worker = AgentWorker(worker_id="phase-v047-continue-gate")
+    worker._publish = AsyncMock()
+    worker._make_abort_checker = lambda session_id, run_id: AsyncMock(return_value=False)
+
+    with pytest.MonkeyPatch.context() as mp:
+        from agent import worker as worker_module
+        mp.setattr(worker_module, "execute_continue", AsyncMock())
+        mp.setattr(
+            "agent.executor._update_db_status",
+            AsyncMock(),
+        )
+        await worker._execute_continue(str(uuid.uuid4()), uuid.uuid4(), payload)
+
+        worker_module.execute_continue.assert_awaited_once()
+        assert worker_module.execute_continue.await_args.kwargs["payload"] == payload

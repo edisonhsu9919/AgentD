@@ -91,6 +91,12 @@ class RuntimeResponse(BaseModel):
     retryable_model_continuation: bool = False
     retry_kind: Optional[str] = None
     provider_error_category: Optional[str] = None
+    last_run_error_category: Optional[str] = None
+    recovery_state: str = "none"
+    recovery_envelope: Optional[dict[str, Any]] = None
+    next_action: Optional[str] = None
+    can_retry: bool = False
+    can_recover: bool = False
     checkpoint_state_kind: Optional[str] = None
     runtime_state: Optional[str] = None
     can_accept_user_prompt: bool = True

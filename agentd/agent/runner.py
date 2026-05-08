@@ -88,11 +88,42 @@ async def _run_start(
         await _update_db_status(session_id, "idle")
         await event_bus.publish(session_id, {"event": "status_change", "status": "idle"})
     except Exception as e:
+        from agent.runtime_error_classifier import RuntimeErrorClassifier, session_status_for_envelope
+        from agent.runtime_recovery import persist_session_recovery_envelope
+        from core.database import AsyncSessionLocal
         from agent.executor import _update_db_status
-        await _update_db_status(session_id, "error")
-        await event_bus.publish(session_id, {"event": "status_change", "status": "error"})
+        envelope = RuntimeErrorClassifier.classify_exception(e, run_type="start")
+        next_status = session_status_for_envelope(envelope)
+        async with AsyncSessionLocal() as db:
+            persisted_run_id = await persist_session_recovery_envelope(
+                db,
+                session_id=uuid.UUID(session_id),
+                envelope=envelope,
+                extra_diagnostics={
+                    "source": "legacy_runner",
+                    "legacy_runner_without_run_id": True,
+                },
+                update_session_status=False,
+            )
+            await db.commit()
+        await _update_db_status(session_id, next_status)
+        await event_bus.publish(session_id, {"event": "status_change", "status": next_status})
         await event_bus.publish(session_id, {
-            "event": "error", "code": "llm_error", "message": str(e),
+            "event": "run_failed_terminal" if envelope.severity == "terminal" else "run_failed_recoverable",
+            "run_id": str(persisted_run_id) if persisted_run_id else None,
+            "persisted": persisted_run_id is not None,
+            "persistence_reason": None if persisted_run_id else "no_target_run",
+            "old_state": "none",
+            "new_state": envelope.recovery_state,
+            "category": envelope.category,
+            "next_action": envelope.next_action,
+            "user_message": envelope.user_message,
+            "recovery_envelope": envelope.model_dump(mode="json"),
+        })
+        await event_bus.publish(session_id, {
+            "event": "error", "code": envelope.category, "message": str(e),
+            "recovery_state": envelope.recovery_state,
+            "next_action": envelope.next_action,
         })
         if settings.debug:
             traceback.print_exc()
@@ -131,10 +162,42 @@ async def _run_resume(session_id: str, decisions: list[dict]) -> None:
         await _update_db_status(session_id, "idle")
         await event_bus.publish(session_id, {"event": "status_change", "status": "idle"})
     except Exception as e:
-        await _update_db_status(session_id, "error")
-        await event_bus.publish(session_id, {"event": "status_change", "status": "error"})
+        from agent.runtime_error_classifier import RuntimeErrorClassifier, session_status_for_envelope
+        from agent.runtime_recovery import persist_session_recovery_envelope
+        from core.database import AsyncSessionLocal
+
+        envelope = RuntimeErrorClassifier.classify_exception(e, run_type="resume")
+        next_status = session_status_for_envelope(envelope)
+        async with AsyncSessionLocal() as db:
+            persisted_run_id = await persist_session_recovery_envelope(
+                db,
+                session_id=uuid.UUID(session_id),
+                envelope=envelope,
+                extra_diagnostics={
+                    "source": "legacy_runner",
+                    "legacy_runner_without_run_id": True,
+                },
+                update_session_status=False,
+            )
+            await db.commit()
+        await _update_db_status(session_id, next_status)
+        await event_bus.publish(session_id, {"event": "status_change", "status": next_status})
         await event_bus.publish(session_id, {
-            "event": "error", "code": "llm_error", "message": str(e),
+            "event": "run_failed_terminal" if envelope.severity == "terminal" else "run_failed_recoverable",
+            "run_id": str(persisted_run_id) if persisted_run_id else None,
+            "persisted": persisted_run_id is not None,
+            "persistence_reason": None if persisted_run_id else "no_target_run",
+            "old_state": "none",
+            "new_state": envelope.recovery_state,
+            "category": envelope.category,
+            "next_action": envelope.next_action,
+            "user_message": envelope.user_message,
+            "recovery_envelope": envelope.model_dump(mode="json"),
+        })
+        await event_bus.publish(session_id, {
+            "event": "error", "code": envelope.category, "message": str(e),
+            "recovery_state": envelope.recovery_state,
+            "next_action": envelope.next_action,
         })
         if settings.debug:
             traceback.print_exc()

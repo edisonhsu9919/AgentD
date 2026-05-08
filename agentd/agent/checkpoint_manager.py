@@ -30,8 +30,19 @@ logger = logging.getLogger(__name__)
 
 class CheckpointManager:
     @staticmethod
-    async def validate_continue_checkpoint(agent, config: dict, session_id: str) -> None:
-        await validate_continue_checkpoint(agent, config, session_id)
+    async def validate_continue_checkpoint(
+        agent,
+        config: dict,
+        session_id: str,
+        *,
+        retry_context: dict[str, Any] | None = None,
+    ) -> None:
+        await validate_continue_checkpoint(
+            agent,
+            config,
+            session_id,
+            retry_context=retry_context,
+        )
 
     @staticmethod
     async def ensure_tool_adjacency_ready(
@@ -71,7 +82,13 @@ class CheckpointManager:
         )
 
 
-async def validate_continue_checkpoint(agent, config: dict, session_id: str) -> None:
+async def validate_continue_checkpoint(
+    agent,
+    config: dict,
+    session_id: str,
+    *,
+    retry_context: dict[str, Any] | None = None,
+) -> None:
     snapshot = await agent.aget_state(config)
     state = classify_checkpoint_snapshot(snapshot, run_type="continue")
     if (
@@ -81,11 +98,44 @@ async def validate_continue_checkpoint(agent, config: dict, session_id: str) -> 
         and state.interrupt_count == 0
     ):
         return
+    if _allows_reactive_context_overflow_provider_ready(state, retry_context):
+        return
     raise RuntimeError(
         "Continue checkpoint is not retryable: "
         f"session={session_id} state_kind={state.state_kind.value} "
         f"provider_ready={state.is_provider_payload_ready} "
         f"interrupts={state.interrupt_count} reason={state.reason}"
+    )
+
+
+def _allows_reactive_context_overflow_provider_ready(
+    state,
+    retry_context: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(retry_context, dict):
+        return False
+    auto_recovery = retry_context.get("auto_recovery")
+    if not isinstance(auto_recovery, dict):
+        return False
+    if retry_context.get("mode") != "retry_model_node":
+        return False
+    if not retry_context.get("source_run_id"):
+        return False
+    if auto_recovery.get("strategy") != "reactive_compact_then_continue":
+        return False
+    if auto_recovery.get("category") != "provider_context_overflow":
+        return False
+    if state.state_kind != CheckpointStateKind.PROVIDER_READY:
+        return False
+    if not state.checkpoint_valid or not state.is_provider_payload_ready:
+        return False
+    if state.interrupt_count != 0:
+        return False
+    return not (
+        state.bad_indices
+        or state.open_tool_call_ids
+        or state.orphan_tool_call_ids
+        or state.orphan_tool_message_ids
     )
 
 

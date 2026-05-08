@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -250,19 +251,28 @@ def test_extension_metadata_router_filters_visibility(tmp_path, monkeypatch):
     assert admin_response.json()["data"]["extensions"][0]["name"] == "demo-domain"
 
 
-def test_repo_example_extension_loads_by_default(monkeypatch):
+def test_repo_example_extension_is_disabled_sample(monkeypatch):
     monkeypatch.delenv("AGENTD_EXTENSION_DIRS", raising=False)
 
     registry = load_extensions()
     runtime = registry.get_runtime("example-domain")
 
     assert runtime is not None
-    assert runtime.status == "enabled"
-    assert any(tool.tool.name == "example_domain_ping" for tool in registry.get_loaded_tools())
+    assert runtime.status == "disabled"
+    assert all(tool.tool.name != "example_domain_ping" for tool in registry.get_loaded_tools())
+    assert all(router.extension_name != "example-domain" for router in registry.get_routers())
 
 
-def test_repo_example_page_schema_uses_agentd_envelope(monkeypatch):
-    monkeypatch.delenv("AGENTD_EXTENSION_DIRS", raising=False)
+def test_repo_example_page_schema_uses_agentd_envelope_when_enabled(tmp_path, monkeypatch):
+    source = Path(__file__).resolve().parents[1].parent / "extensions" / "example-domain"
+    target = tmp_path / "example-domain"
+    shutil.copytree(source, target)
+    manifest_path = target / "agentd_extension.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["enabled"] = True
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("AGENTD_EXTENSION_DIRS", str(tmp_path))
+
     registry = load_extensions()
 
     app = FastAPI()

@@ -13,6 +13,7 @@ Covers:
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -250,14 +251,18 @@ class TestWorkerFailureHandling:
         worker._publish = AsyncMock()
 
         db = AsyncMock()
+        db.get.return_value = SimpleNamespace(diagnostics={})
         session_ctx = AsyncMock()
         session_ctx.__aenter__.return_value = db
         session_ctx.__aexit__.return_value = False
 
+        from agent.auto_recovery import AutoRecoveryResult
+
         with (
             patch("agent.worker.AsyncSessionLocal", return_value=session_ctx),
             patch("agent.worker.scheduler.mark_failed", new=AsyncMock()),
-            patch("agent.executor._update_db_status", new=AsyncMock()) as mock_update_status,
+            patch("agent.runtime_recovery.session_svc.update_session_status", new=AsyncMock()) as mock_update_status,
+            patch("agent.auto_recovery.attempt_auto_recovery", new=AsyncMock(return_value=AutoRecoveryResult(False))),
         ):
             await worker._execute_run(
                 uuid.uuid4(),
@@ -266,14 +271,18 @@ class TestWorkerFailureHandling:
                 {"is_subtask_continuation": True},
             )
 
-        mock_update_status.assert_awaited_once_with(mock_update_status.await_args.args[0], "idle")
+        mock_update_status.assert_awaited_once_with(
+            mock_update_status.await_args.args[0],
+            mock_update_status.await_args.args[1],
+            "idle",
+        )
         status_event = worker._publish.await_args_list[0].args[1]
-        error_event = worker._publish.await_args_list[1].args[1]
+        error_event = worker._publish.await_args_list[3].args[1]
         assert status_event == {"event": "status_change", "status": "idle"}
-        assert error_event["code"] == "subtask_continuation_error"
+        assert error_event["code"] == "provider_transient"
 
     @pytest.mark.asyncio
-    async def test_regular_failure_still_marks_error(self):
+    async def test_regular_failure_is_recoverable_fail_soft(self):
         from agent.worker import AgentWorker
 
         worker = AgentWorker(worker_id="test-worker")
@@ -282,14 +291,18 @@ class TestWorkerFailureHandling:
         worker._publish = AsyncMock()
 
         db = AsyncMock()
+        db.get.return_value = SimpleNamespace(diagnostics={})
         session_ctx = AsyncMock()
         session_ctx.__aenter__.return_value = db
         session_ctx.__aexit__.return_value = False
 
+        from agent.auto_recovery import AutoRecoveryResult
+
         with (
             patch("agent.worker.AsyncSessionLocal", return_value=session_ctx),
             patch("agent.worker.scheduler.mark_failed", new=AsyncMock()),
-            patch("agent.executor._update_db_status", new=AsyncMock()) as mock_update_status,
+            patch("agent.runtime_recovery.session_svc.update_session_status", new=AsyncMock()) as mock_update_status,
+            patch("agent.auto_recovery.attempt_auto_recovery", new=AsyncMock(return_value=AutoRecoveryResult(False))),
         ):
             await worker._execute_run(
                 uuid.uuid4(),
@@ -298,11 +311,15 @@ class TestWorkerFailureHandling:
                 {},
             )
 
-        mock_update_status.assert_awaited_once_with(mock_update_status.await_args.args[0], "error")
+        mock_update_status.assert_awaited_once_with(
+            mock_update_status.await_args.args[0],
+            mock_update_status.await_args.args[1],
+            "idle",
+        )
         status_event = worker._publish.await_args_list[0].args[1]
-        error_event = worker._publish.await_args_list[1].args[1]
-        assert status_event == {"event": "status_change", "status": "error"}
-        assert error_event["code"] == "worker_error"
+        error_event = worker._publish.await_args_list[3].args[1]
+        assert status_event == {"event": "status_change", "status": "idle"}
+        assert error_event["code"] == "provider_transient"
 
 
 # ── Unit tests: Executor module separation ────────────────────────────────

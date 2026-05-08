@@ -362,7 +362,23 @@ async def _monitor_process(
     except Exception as e:
         logger.error("Process monitor error for task %s: %s", task_id, e)
         update_task_status(session_dir, task_id, "failed", error=str(e))
+        write_task_result(session_dir, task_id, {
+            "status": "failed",
+            "error": str(e),
+            "source": "monitor_exception",
+        })
         _update_db_status(session_id, task_id, "failed", str(e))
+        if publish:
+            try:
+                await publish(session_id, {
+                    "event": "task_failed",
+                    "task_id": task_id,
+                    "status": "failed",
+                    "error": str(e),
+                    "source": "monitor_exception",
+                })
+            except Exception:
+                pass
         return
 
     # Determine final status

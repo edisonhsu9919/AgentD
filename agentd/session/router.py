@@ -5,7 +5,7 @@ import os
 import shutil
 import uuid
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
@@ -198,6 +198,100 @@ def _diagnostics_projection_repaired(diagnostics: Optional[dict]) -> bool:
         return True
     repair = diagnostics.get("projection_repair")
     return bool(isinstance(repair, dict) and repair.get("repaired") is True)
+
+
+def _run_id_value(run: Any) -> Any:
+    return getattr(run, "id", None) if run is not None else None
+
+
+def _run_diagnostics(run: Any) -> dict[str, Any]:
+    diagnostics = getattr(run, "diagnostics", None) if run is not None else None
+    return diagnostics if isinstance(diagnostics, dict) else {}
+
+
+def _active_recovery_run(session: Any, latest_run: Any, latest_error_run: Any) -> Any | None:
+    """Return the run whose envelope is still active for /runtime.
+
+    Phase v0.4.7 / B separates historical ``last_error`` from active recovery
+    truth. A stale failed run must not keep recovery buttons alive after a
+    newer successful run has completed.
+    """
+    if latest_run is None:
+        return None
+    latest_diag = _run_diagnostics(latest_run)
+    latest_payload = getattr(latest_run, "payload", None)
+    auto_recovery_payload = (
+        latest_payload.get("auto_recovery")
+        if isinstance(latest_payload, dict)
+        else None
+    )
+    if (
+        latest_error_run is not None
+        and isinstance(auto_recovery_payload, dict)
+        and str(auto_recovery_payload.get("source_run_id") or "") == str(_run_id_value(latest_error_run))
+        and getattr(latest_error_run, "status", None) == "failed"
+    ):
+        latest_status = str(getattr(latest_run, "status", "") or "")
+        if latest_status in {"queued", "claimed", "running"}:
+            return latest_error_run
+        if latest_status == "failed":
+            return latest_run
+        return None
+    if (
+        latest_diag.get("recovery_unresolved") is True
+        and isinstance(latest_diag.get("recovery_envelope"), dict)
+    ):
+        return latest_run
+    if (
+        latest_error_run is not None
+        and _run_id_value(latest_run) == _run_id_value(latest_error_run)
+        and getattr(latest_error_run, "status", None) == "failed"
+    ):
+        return latest_error_run
+    if (
+        getattr(session, "status", None) in {"error", "waiting", "subtask_waiting"}
+        and latest_error_run is not None
+        and getattr(latest_error_run, "status", None) == "failed"
+    ):
+        return latest_error_run
+    return None
+
+
+def _runtime_recovery_flags(
+    *,
+    recovery_envelope: dict[str, Any] | None,
+    recovery_state: str,
+    session_status: str,
+    can_accept_user_prompt: bool,
+) -> tuple[bool, bool, bool]:
+    if not recovery_envelope:
+        return False, False, can_accept_user_prompt
+    active_session = session_status in {"queued", "running", "waiting", "subtask_waiting"}
+    next_action = str(recovery_envelope.get("next_action") or "")
+    category = str(recovery_envelope.get("category") or "")
+    can_retry = (
+        not active_session
+        and bool(recovery_envelope.get("safe_to_retry"))
+        and recovery_state in {"recoverable", "user_action_required"}
+        and category not in {
+            "provider_config_error",
+            "provider_bad_request_params",
+            "provider_context_overflow",
+        }
+    )
+    can_recover = (
+        not active_session
+        and next_action in {"recover", "auto_recovering"}
+        and recovery_state in {"recoverable", "auto_recovering"}
+    )
+    if recovery_state == "terminal":
+        can_accept_user_prompt = False
+    else:
+        can_accept_user_prompt = (
+            can_accept_user_prompt
+            and bool(recovery_envelope.get("safe_to_continue_user_prompt", True))
+        )
+    return can_retry, can_recover, can_accept_user_prompt
 
 
 async def _load_checkpoint_state(session, current_user: User):
@@ -629,6 +723,12 @@ async def get_runtime(
     retryable_model_continuation = False
     retry_kind = None
     provider_error_category = None
+    last_run_error_category = None
+    recovery_state = "none"
+    recovery_envelope = None
+    next_action = None
+    can_retry = False
+    can_recover = False
     checkpoint_state_kind = None
     runtime_state = None
     can_accept_user_prompt = session.status not in {"queued", "running", "waiting", "subtask_waiting"}
@@ -638,6 +738,14 @@ async def get_runtime(
         from agent.recovery_policy import RecoveryDecisionKind, RecoveryPolicy
         from agent.run_models import AgentRun
         from sqlalchemy import select as sa_select
+
+        latest_stmt = (
+            sa_select(AgentRun)
+            .where(AgentRun.session_id == session_id)
+            .order_by(AgentRun.updated_at.desc())
+            .limit(1)
+        )
+        latest_run = (await db.execute(latest_stmt)).scalar_one_or_none()
 
         stmt = (
             sa_select(AgentRun)
@@ -681,11 +789,70 @@ async def get_runtime(
         last_error_run = (await db.execute(err_stmt)).scalar_one_or_none()
         if last_error_run and last_error_run.error:
             last_error = last_error_run.error
+            from agent.runtime_error_classifier import (
+                RuntimeErrorClassifier,
+                recovery_state_from_envelope,
+            )
+
+            historical_diag = _run_diagnostics(last_error_run)
+            historical_envelope = historical_diag.get("recovery_envelope")
+            if isinstance(historical_envelope, dict):
+                last_run_error_category = str(historical_envelope.get("category") or "") or None
+            else:
+                last_run_error_category = RuntimeErrorClassifier.classify_error_text(
+                    last_error_run.error,
+                    run_type=last_error_run.run_type,
+                    context={"source": "runtime_endpoint_last_error_fallback"},
+                ).category
+
+            active_recovery_run = _active_recovery_run(
+                session,
+                latest_run,
+                last_error_run,
+            )
+        else:
+            active_recovery_run = _active_recovery_run(
+                session,
+                latest_run,
+                None,
+            )
+
+        if active_recovery_run is not None:
+            from agent.runtime_error_classifier import (
+                RuntimeErrorClassifier,
+                recovery_state_from_envelope,
+            )
+
+            failed_diag = (
+                active_recovery_run.diagnostics
+                if isinstance(active_recovery_run.diagnostics, dict)
+                else {}
+            )
+            persisted_envelope = failed_diag.get("recovery_envelope") if isinstance(failed_diag, dict) else None
+            if isinstance(persisted_envelope, dict):
+                recovery_envelope = persisted_envelope
+            else:
+                recovery_envelope = RuntimeErrorClassifier.classify_error_text(
+                    getattr(active_recovery_run, "error", None),
+                    run_type=getattr(active_recovery_run, "run_type", None),
+                    context={
+                        "source": "runtime_endpoint_fallback",
+                    },
+                ).model_dump(mode="json")
+            recovery_state = recovery_state_from_envelope(recovery_envelope)
+            last_run_error_category = recovery_envelope.get("category")
+            next_action = recovery_envelope.get("next_action")
+            can_retry, can_recover, can_accept_user_prompt = _runtime_recovery_flags(
+                recovery_envelope=recovery_envelope,
+                recovery_state=recovery_state,
+                session_status=session.status,
+                can_accept_user_prompt=can_accept_user_prompt,
+            )
             checkpoint_state = await _load_checkpoint_state(session, current_user)
             decision = RecoveryPolicy.decide(_build_recovery_input(
                 session=session,
                 checkpoint_state=checkpoint_state,
-                failed_run=last_error_run,
+                failed_run=active_recovery_run,
             ))
             retryable_model_continuation = (
                 decision.kind == RecoveryDecisionKind.CONTINUE_MODEL
@@ -693,6 +860,7 @@ async def get_runtime(
             )
             retry_kind = decision.retry_kind
             provider_error_category = decision.provider_error_category
+            provider_error_category = provider_error_category or last_run_error_category
             checkpoint_state_kind = decision.checkpoint_state_kind
             runtime_state = runtime_state or checkpoint_state_kind
     except Exception:
@@ -700,6 +868,10 @@ async def get_runtime(
 
     if retryable_model_continuation:
         resumable = True
+
+    if session.status == "error" and recovery_state == "none":
+        recovery_state = "terminal"
+        can_accept_user_prompt = False
 
     # Phase N1: read compaction state from context_summary.json
     last_compaction_at = None
@@ -758,6 +930,12 @@ async def get_runtime(
         retryable_model_continuation=retryable_model_continuation,
         retry_kind=retry_kind,
         provider_error_category=provider_error_category,
+        last_run_error_category=last_run_error_category,
+        recovery_state=recovery_state,
+        recovery_envelope=recovery_envelope,
+        next_action=next_action,
+        can_retry=can_retry,
+        can_recover=can_recover,
         checkpoint_state_kind=checkpoint_state_kind,
         runtime_state=runtime_state or checkpoint_state_kind,
         can_accept_user_prompt=can_accept_user_prompt,
@@ -1056,6 +1234,13 @@ async def retry_session_model_continuation(
             },
         )
 
+    latest_stmt = (
+        sa_select(AgentRun)
+        .where(AgentRun.session_id == session_id)
+        .order_by(AgentRun.updated_at.desc())
+        .limit(1)
+    )
+    latest_run = (await db.execute(latest_stmt)).scalar_one_or_none()
     err_stmt = (
         sa_select(AgentRun)
         .where(AgentRun.session_id == session_id)
@@ -1065,6 +1250,7 @@ async def retry_session_model_continuation(
         .limit(1)
     )
     last_error_run = (await db.execute(err_stmt)).scalar_one_or_none()
+    active_recovery_run = _active_recovery_run(session, latest_run, last_error_run)
     hitl_recovery = await _inspect_open_hitl_recovery(db, session, current_user)
     checkpoint_state = hitl_recovery.checkpoint_state or await _load_checkpoint_state(
         session,
@@ -1073,7 +1259,7 @@ async def retry_session_model_continuation(
     hitl_decision = RecoveryPolicy.decide(_build_recovery_input(
         session=session,
         checkpoint_state=checkpoint_state,
-        failed_run=last_error_run,
+        failed_run=active_recovery_run,
         hitl_recovery=hitl_recovery,
     ))
     if hitl_decision.kind == RecoveryDecisionKind.WAITING_PERMISSION:
@@ -1106,14 +1292,14 @@ async def retry_session_model_continuation(
     decision = RecoveryPolicy.decide(_build_recovery_input(
         session=session,
         checkpoint_state=checkpoint_state,
-        failed_run=last_error_run,
+        failed_run=active_recovery_run,
     ))
     if decision.kind != RecoveryDecisionKind.CONTINUE_MODEL or not decision.allowed:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "code": "NOT_RETRYABLE",
-                "message": "Latest failed run is not a retryable model continuation",
+                "message": "No active failed run is retryable as a model continuation",
                 "reason": decision.reason,
                 "provider_error_category": decision.provider_error_category,
                 "checkpoint_state_kind": decision.checkpoint_state_kind,
@@ -1133,6 +1319,39 @@ async def retry_session_model_continuation(
         "status": "queued",
         "mode": "retry_model_node",
     })
+
+
+@router.post("/{session_id}/doctor")
+async def doctor_session_runtime(
+    session_id: uuid.UUID,
+    dry_run: bool = Query(False, description="Inspect only; do not apply repairs"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Run the v0.4.7 session doctor for conservative runtime repairs."""
+    from agent.session_doctor import run_session_doctor
+    from core.events import event_bus
+
+    session = await session_svc.get_session(db, session_id)
+    if not session or session.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Session not found"},
+        )
+
+    report = await run_session_doctor(
+        db,
+        session=session,
+        dry_run=dry_run,
+        publish=event_bus.publish,
+    )
+    await db.commit()
+    if report.repaired:
+        await event_bus.publish(str(session_id), {
+            "event": "session_doctor_repaired",
+            "actions": [action.to_dict() for action in report.actions if action.applied],
+        })
+    return ok(report.to_dict())
 
 
 @router.get("/{session_id}/events")

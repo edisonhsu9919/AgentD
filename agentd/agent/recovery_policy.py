@@ -55,6 +55,9 @@ class RecoveryPolicy:
     PROVIDER_CONTINUABLE = {
         ProviderErrorCategory.PROVIDER_TIMEOUT.value,
         ProviderErrorCategory.PROVIDER_CONNECTION_ERROR.value,
+        ProviderErrorCategory.PROVIDER_SERVER_ERROR.value,
+        "provider_transient",
+        "provider_empty_stream",
         "runtime_projection_repaired",
     }
     PROVIDER_HARD_ERRORS = {
@@ -105,10 +108,39 @@ class RecoveryPolicy:
                 checkpoint_state_kind=None,
             )
 
-        if not cls._checkpoint_allows_continue(state):
+        closed_tool_result_continue = cls._checkpoint_allows_continue(state)
+        context_overflow_retry = cls._checkpoint_allows_context_overflow_retry(
+            state,
+            payload=payload,
+            category=category,
+        )
+        if not closed_tool_result_continue and not context_overflow_retry:
             return RecoveryDecision(
                 kind=RecoveryDecisionKind.HARD_ERROR,
                 reason=f"checkpoint_not_continuable:{state.state_kind.value}",
+                provider_error_category=category,
+                checkpoint_state_kind=state_kind,
+            )
+
+        if context_overflow_retry:
+            if not payload.source_run_id:
+                return RecoveryDecision(
+                    kind=RecoveryDecisionKind.HARD_ERROR,
+                    reason="missing_source_run_id",
+                    provider_error_category=category,
+                    checkpoint_state_kind=state_kind,
+                )
+            return RecoveryDecision(
+                kind=RecoveryDecisionKind.CONTINUE_MODEL,
+                allowed=True,
+                retry_kind="model_continuation",
+                reason=f"reactive_compact_retry_after_{state.state_kind.value}",
+                target_run_type="continue",
+                target_payload={
+                    "mode": "retry_model_node",
+                    "source_run_id": payload.source_run_id,
+                },
+                target_session_status="queued",
                 provider_error_category=category,
                 checkpoint_state_kind=state_kind,
             )
@@ -199,6 +231,43 @@ class RecoveryPolicy:
             and state.checkpoint_valid
             and state.is_provider_payload_ready
             and state.interrupt_count == 0
+        )
+
+    @classmethod
+    def _checkpoint_allows_context_overflow_retry(
+        cls,
+        state: CheckpointState,
+        *,
+        payload: RecoveryPolicyInput,
+        category: str | None,
+    ) -> bool:
+        if category != "provider_context_overflow":
+            return False
+        diagnostics = payload.diagnostics if isinstance(payload.diagnostics, dict) else {}
+        compact_result = diagnostics.get("compact_result")
+        compacted = bool(
+            diagnostics.get("reactive_compact_succeeded")
+            or (
+                isinstance(compact_result, dict)
+                and compact_result.get("compacted") is True
+            )
+        )
+        if not compacted:
+            return False
+        if state.state_kind not in {
+            CheckpointStateKind.PROVIDER_READY,
+            CheckpointStateKind.NEXT_MODEL_AFTER_TOOL_RESULT,
+        }:
+            return False
+        if not state.checkpoint_valid or not state.is_provider_payload_ready:
+            return False
+        if state.interrupt_count != 0:
+            return False
+        return not (
+            state.bad_indices
+            or state.open_tool_call_ids
+            or state.orphan_tool_call_ids
+            or state.orphan_tool_message_ids
         )
 
     @classmethod

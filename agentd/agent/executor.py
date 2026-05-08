@@ -265,6 +265,7 @@ async def execute_continue(
     publish: PublishFn,
     check_abort: Optional[AbortCheckFn] = None,
     run_id: str | None = None,
+    payload: dict[str, Any] | None = None,
 ) -> None:
     """Execute a checkpoint continuation without adding a user message."""
     async with AsyncSessionLocal() as db:
@@ -305,7 +306,7 @@ async def execute_continue(
     )
     config = {"configurable": {"thread_id": session_id}}
 
-    await _validate_continue_checkpoint(agent, config, session_id)
+    await _validate_continue_checkpoint(agent, config, session_id, retry_context=payload)
     await _execute_graph(
         agent, None, config, session_id, session_dir, publish, check_abort,
         skip_pre_microcompact=True,
@@ -315,12 +316,19 @@ async def execute_continue(
 # ── Core execution loop ──────────────────────────────────────────────────
 
 
-async def _validate_continue_checkpoint(agent, config: dict, session_id: str) -> None:
+async def _validate_continue_checkpoint(
+    agent,
+    config: dict,
+    session_id: str,
+    *,
+    retry_context: dict[str, Any] | None = None,
+) -> None:
     """Gate narrow continue runs to closed tool_result -> model checkpoints."""
     await checkpoint_mgr.CheckpointManager.validate_continue_checkpoint(
         agent,
         config,
         session_id,
+        retry_context=retry_context,
     )
 
 

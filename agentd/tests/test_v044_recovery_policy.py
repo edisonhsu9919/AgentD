@@ -26,6 +26,15 @@ def _closed_tool_result_state():
     )
 
 
+def _provider_ready_state():
+    return classify_checkpoint(
+        [
+            HumanMessage(content="please continue"),
+        ],
+        next_nodes=["model"],
+    )
+
+
 def _hitl_state():
     return classify_checkpoint(
         [
@@ -183,3 +192,69 @@ def test_missing_source_run_id_blocks_continue_payload():
 
     assert decision.kind == RecoveryDecisionKind.HARD_ERROR
     assert decision.reason == "missing_source_run_id"
+
+
+def test_context_overflow_after_successful_compact_provider_ready_allows_continue():
+    decision = RecoveryPolicy.decide(_input(
+        failed_run_error="400 context_length_exceeded",
+        diagnostics={
+            "provider_error_category": "provider_context_overflow",
+            "reactive_compact_succeeded": True,
+        },
+        checkpoint_state=_provider_ready_state(),
+    ))
+
+    assert decision.kind == RecoveryDecisionKind.CONTINUE_MODEL
+    assert decision.allowed is True
+    assert decision.reason == "reactive_compact_retry_after_provider_ready"
+    assert decision.target_payload == {
+        "mode": "retry_model_node",
+        "source_run_id": "run-1",
+    }
+    assert decision.checkpoint_state_kind == CheckpointStateKind.PROVIDER_READY.value
+
+
+def test_context_overflow_provider_ready_without_compact_success_stays_blocked():
+    decision = RecoveryPolicy.decide(_input(
+        failed_run_error="400 context_length_exceeded",
+        diagnostics={"provider_error_category": "provider_context_overflow"},
+        checkpoint_state=_provider_ready_state(),
+    ))
+
+    assert decision.kind == RecoveryDecisionKind.HARD_ERROR
+    assert decision.allowed is False
+    assert decision.reason == "checkpoint_not_continuable:provider_ready"
+
+
+def test_transient_provider_ready_even_after_compact_flag_stays_blocked():
+    decision = RecoveryPolicy.decide(_input(
+        failed_run_error="provider transient",
+        diagnostics={
+            "provider_error_category": "provider_transient",
+            "reactive_compact_succeeded": True,
+        },
+        checkpoint_state=_provider_ready_state(),
+    ))
+
+    assert decision.kind == RecoveryDecisionKind.HARD_ERROR
+    assert decision.allowed is False
+    assert decision.reason == "checkpoint_not_continuable:provider_ready"
+
+
+def test_context_overflow_after_successful_compact_closed_tool_result_allows_continue():
+    decision = RecoveryPolicy.decide(_input(
+        failed_run_error="400 context_length_exceeded",
+        diagnostics={
+            "provider_error_category": "provider_context_overflow",
+            "reactive_compact_succeeded": True,
+        },
+        checkpoint_state=_closed_tool_result_state(),
+    ))
+
+    assert decision.kind == RecoveryDecisionKind.CONTINUE_MODEL
+    assert decision.allowed is True
+    assert decision.reason == "reactive_compact_retry_after_next_model_after_tool_result"
+    assert decision.target_payload == {
+        "mode": "retry_model_node",
+        "source_run_id": "run-1",
+    }
