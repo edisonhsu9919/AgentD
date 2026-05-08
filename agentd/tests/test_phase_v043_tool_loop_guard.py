@@ -110,6 +110,25 @@ class TestKnowledgeCanonicalDedup:
 
 class TestToolLoopCircuitBreaker:
     @pytest.mark.asyncio
+    async def test_tool_call_budget_returns_blocked_result_without_same_args_message(self, monkeypatch):
+        import tools.registry as registry_module
+
+        session_id = "phase-v046-budget"
+        reset_tool_call_counter(session_id)
+        monkeypatch.setattr(registry_module, "_MAX_TOOL_CALLS_PER_RUN", 1)
+        ctx = _make_ctx(session_id=session_id)
+        skill = _get_lc_tool("skill", ctx)
+
+        await skill.ainvoke({"action": "list"})
+        blocked = await skill.ainvoke({"action": "list"})
+
+        assert "BLOCKED" in blocked
+        assert "tool call budget exceeded" in blocked
+        assert "same canonical parameters" not in blocked
+        diagnostics = get_tool_loop_guard_diagnostics(session_id)
+        assert diagnostics["tool_loop_guard_reason"] == "tool_call_budget_exceeded"
+
+    @pytest.mark.asyncio
     async def test_skill_null_loop_hard_stops_on_seventh_call(self):
         session_id = "phase-v043-skill"
         reset_tool_call_counter(session_id)

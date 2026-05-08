@@ -198,6 +198,68 @@ class TestFileToolsRejectInternal:
         assert "Hello, world!" in result["output"]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "filename, payload",
+        [
+            ("sample.docx", b"PK\x03\x04fake office zip"),
+            ("sample.xlsx", b"PK\x03\x04fake workbook zip"),
+            ("sample.pdf", b"%PDF-1.7\nfake pdf"),
+            ("sample.png", b"\x89PNG\r\n\x1a\nfake png"),
+            ("sample.zip", b"PK\x03\x04fake zip"),
+        ],
+    )
+    async def test_file_read_rejects_structured_binary_extensions(
+        self,
+        tool_ctx,
+        session_dir,
+        filename,
+        payload,
+    ):
+        from tools.file_read import FileReadTool
+
+        with open(os.path.join(session_dir, filename), "wb") as f:
+            f.write(payload)
+
+        tool = FileReadTool()
+        result = await tool.execute(tool_ctx, path=filename)
+
+        assert result["is_error"] is True
+        assert "plain text" in result["output"]
+        assert "file_inspect" in result["output"]
+
+    @pytest.mark.asyncio
+    async def test_file_read_rejects_binary_disguised_as_text(self, tool_ctx, session_dir):
+        from tools.file_read import FileReadTool
+
+        with open(os.path.join(session_dir, "fake.txt"), "wb") as f:
+            f.write(b"hello\x00\x00\x00\x00world")
+
+        tool = FileReadTool()
+        result = await tool.execute(tool_ctx, path="fake.txt")
+
+        assert result["is_error"] is True
+        assert "plain text" in result["output"]
+
+    @pytest.mark.asyncio
+    async def test_file_read_allows_json_csv_and_py_text(self, tool_ctx, session_dir):
+        from tools.file_read import FileReadTool
+
+        files = {
+            "data.json": '{"ok": true}\n',
+            "rows.csv": "name,value\na,1\n",
+            "script.py": "print('ok')\n",
+        }
+        for filename, content in files.items():
+            with open(os.path.join(session_dir, filename), "w", encoding="utf-8") as f:
+                f.write(content)
+
+        tool = FileReadTool()
+        for filename, content in files.items():
+            result = await tool.execute(tool_ctx, path=filename)
+            assert result["is_error"] is False
+            assert result["output"] == content
+
+    @pytest.mark.asyncio
     async def test_file_write_normal_file_works(self, tool_ctx, session_dir):
         from tools.file_write import FileWriteTool
         tool = FileWriteTool()

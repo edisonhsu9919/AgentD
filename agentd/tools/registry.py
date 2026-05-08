@@ -259,14 +259,22 @@ def _check_tool_dedup(session_id: str, tool: BaseTool, kwargs: dict) -> str | No
     count = counters.get(sig, 0)
 
     if state["total_calls"] > _MAX_TOOL_CALLS_PER_RUN:
-        raise _build_tool_loop_breaker(
+        state["blocked_calls"] += 1
+        message = (
+            "BLOCKED: tool call budget exceeded for this run. "
+            "Stop reading more tool results, summarize progress from existing results, "
+            "or write the current partial artifact before continuing in a later run."
+        )
+        _record_tool_loop_trigger(
             session_id=session_id,
             tool_name=tool.name,
             canonical_args=canonical_args,
             blocked_count=state["blocked_calls"],
             identical_call_count=count + 1,
             reason="tool_call_budget_exceeded",
+            message=message,
         )
+        return message
 
     if count >= _MAX_IDENTICAL_TOOL_CALLS_HARD:
         counters[sig] = count + 1
@@ -325,12 +333,23 @@ def _build_tool_loop_breaker(
     identical_call_count: int,
     reason: str,
 ) -> ToolLoopCircuitBreaker:
-    message = (
-        "Tool loop circuit breaker triggered: the model kept repeating an already-blocked "
-        f"{tool_name} call with the same canonical parameters. "
-        "Stop calling this tool with the same arguments and summarize from the existing "
-        "results or wait for further user input."
-    )
+    if reason == "identical_tool_call_loop":
+        message = (
+            "Tool loop circuit breaker triggered: the model kept repeating an already-blocked "
+            f"{tool_name} call with the same canonical parameters. "
+            "Stop calling this tool with the same arguments and summarize from the existing "
+            "results or wait for further user input."
+        )
+    elif reason == "blocked_tool_call_budget_exceeded":
+        message = (
+            "Tool loop circuit breaker triggered: the model repeatedly ignored blocked tool "
+            "results. Stop calling tools and summarize from the existing results."
+        )
+    else:
+        message = (
+            "Tool loop circuit breaker triggered: the run exceeded its tool-call budget. "
+            "Stop calling tools and summarize from the existing results."
+        )
     breaker = ToolLoopCircuitBreaker(
         session_id=session_id,
         tool_name=tool_name,
@@ -340,6 +359,28 @@ def _build_tool_loop_breaker(
         reason=reason,
         message=message,
     )
+    _record_tool_loop_trigger(
+        session_id=session_id,
+        tool_name=tool_name,
+        canonical_args=canonical_args,
+        blocked_count=blocked_count,
+        identical_call_count=identical_call_count,
+        reason=reason,
+        message=message,
+    )
+    return breaker
+
+
+def _record_tool_loop_trigger(
+    *,
+    session_id: str,
+    tool_name: str,
+    canonical_args: dict[str, Any],
+    blocked_count: int,
+    identical_call_count: int,
+    reason: str,
+    message: str,
+) -> None:
     _tool_loop_guard_state[session_id] = {
         **_tool_loop_guard_state.get(session_id, _new_guard_state()),
         "last_trigger": {
@@ -351,7 +392,6 @@ def _build_tool_loop_breaker(
             "message": message,
         },
     }
-    return breaker
 
 
 def _make_coroutine(tool: BaseTool, ctx: ToolContext):
