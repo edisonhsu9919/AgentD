@@ -8,6 +8,11 @@ import fnmatch
 import os
 from typing import Any
 
+from tools.arg_normalization import (
+    ToolArgumentValidationError,
+    normalize_string_arg,
+    normalize_workspace_path_arg,
+)
 from tools.base import BaseTool, ToolContext
 from workspace.manager import validate_path
 _MAX_RESULTS = 200
@@ -23,7 +28,9 @@ class GlobTool(BaseTool):
         return (
             "Find files matching a glob pattern in the workspace. "
             "Supports *, **, and ? wildcards. "
-            "Returns a list of matching relative paths."
+            "Returns a list of matching relative paths. "
+            "Pass raw JSON strings; do not wrap path or pattern in shell quotes. "
+            "For the current session directory, omit path or use '.'."
         )
 
     @property
@@ -57,8 +64,18 @@ class GlobTool(BaseTool):
         }
 
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
-        pattern: str = kwargs["pattern"]
-        path: str = kwargs.get("path") or "."
+        try:
+            pattern = normalize_string_arg(
+                kwargs.get("pattern"),
+                field_name="pattern",
+            )
+            path = normalize_workspace_path_arg(
+                kwargs.get("path"),
+                workspace_dir=ctx.workspace_dir,
+                optional_current_dir=True,
+            )
+        except ToolArgumentValidationError as e:
+            return {"output": str(e), "is_error": True}
 
         try:
             abs_path = validate_path(ctx.workspace_dir, path)

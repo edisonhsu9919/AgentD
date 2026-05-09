@@ -102,6 +102,35 @@ def test_mixed_group_after_auto_sibling_has_only_hitl_open():
 
     assert state.state_kind == CheckpointStateKind.HITL_OPEN_TOOL_CALL
     assert state.open_tool_call_ids == ["call_bash"]
+
+
+def test_mixed_group_with_missing_auto_sibling_still_detects_hitl_open():
+    snapshot = SimpleNamespace(
+        values={"messages": [
+            HumanMessage(content="inspect"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "call_list", "name": "list_dir", "args": {"path": "null"}},
+                    {"id": "call_bash", "name": "bash", "args": {"command": "echo HITL_OK"}},
+                ],
+            ),
+        ]},
+        next=("HumanInTheLoopMiddleware.after_model",),
+        interrupts=[SimpleNamespace(value={
+            "action_requests": [{
+                "name": "bash",
+                "args": {"command": "echo HITL_OK"},
+            }],
+            "tool_call_ids": ["call_bash"],
+        })],
+    )
+
+    assert HITLRuntime.snapshot_is_open_interrupt(snapshot) is True
+    state = classify_checkpoint_snapshot(snapshot)
+    assert state.state_kind == CheckpointStateKind.HITL_OPEN_TOOL_CALL
+    assert state.open_tool_call_ids == ["call_bash"]
+    assert set(state.orphan_tool_call_ids) == {"call_list", "call_bash"}
     assert HITLRuntime.snapshot_is_open_interrupt(snapshot) is True
 
 

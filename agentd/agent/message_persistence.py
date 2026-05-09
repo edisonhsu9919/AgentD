@@ -40,6 +40,52 @@ async def persist_message_incremental(session_id: str, msg) -> None:
             traceback.print_exc()
 
 
+async def persist_tool_group_atomic(
+    session_id: str,
+    ai_message: AIMessage,
+    tool_messages: list[ToolMessage],
+    *,
+    flush_reason: str = "complete_tool_group",
+) -> None:
+    """Persist one complete ordinary tool group in a single DB transaction."""
+    if not isinstance(ai_message, AIMessage) or not getattr(ai_message, "tool_calls", None):
+        return
+
+    try:
+        async with AsyncSessionLocal() as db:
+            sid = uuid.UUID(session_id)
+            existing_keys = await load_existing_part_keys(db, sid)
+            ordered_tool_messages = complete_tool_group_messages(
+                ai_message,
+                tool_messages,
+                flush_reason=flush_reason,
+            )
+
+            assistant_persisted = await persist_runtime_message_once(
+                db,
+                sid,
+                ai_message,
+                existing_keys,
+            )
+            tool_persisted = False
+            for tool_message in ordered_tool_messages:
+                persisted = await persist_runtime_message_once(
+                    db,
+                    sid,
+                    tool_message,
+                    existing_keys,
+                )
+                tool_persisted = tool_persisted or persisted
+
+            if assistant_persisted or tool_persisted:
+                await db.commit()
+            else:
+                await db.rollback()
+    except Exception:
+        if settings.debug:
+            traceback.print_exc()
+
+
 async def persist_messages(session_id: str, messages: list) -> None:
     try:
         async with AsyncSessionLocal() as db:
@@ -181,12 +227,26 @@ def build_persistable_message_parts(
 
     if isinstance(msg, ToolMessage):
         tool_name = getattr(msg, "name", "") or ""
-        return "tool", [with_runtime_message_id({
+        additional = getattr(msg, "additional_kwargs", {}) or {}
+        part = {
             "type": "tool_result",
             "tool_call_id": msg.tool_call_id,
             "tool_name": tool_name,
             "output": msg.content,
             "is_error": is_tool_error(msg),
+        }
+        for key in (
+            "synthetic_close",
+            "error_code",
+            "tool_group_flush_reason",
+            "required_tool_call_ids",
+            "received_tool_result_ids",
+            "missing_tool_result_ids",
+        ):
+            if key in additional:
+                part[key] = additional[key]
+        return "tool", [with_runtime_message_id({
+            **part,
         }, runtime_message_id)], False
 
     if isinstance(msg, HumanMessage):
@@ -207,6 +267,65 @@ def build_persistable_message_parts(
         }, runtime_message_id)], is_summary
 
     return "", [], False
+
+
+def complete_tool_group_messages(
+    ai_message: AIMessage,
+    tool_messages: list[ToolMessage],
+    *,
+    flush_reason: str = "complete_tool_group",
+) -> list[ToolMessage]:
+    """Return one ToolMessage for every AI tool_call, synthesizing safe closes."""
+    by_id: dict[str, ToolMessage] = {}
+    for message in tool_messages or []:
+        if not isinstance(message, ToolMessage):
+            continue
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if tool_call_id and str(tool_call_id) not in by_id:
+            by_id[str(tool_call_id)] = message
+
+    required_ids = [
+        str(tool_call.get("id") or "")
+        for tool_call in getattr(ai_message, "tool_calls", []) or []
+        if tool_call.get("id")
+    ]
+    received_ids = [
+        str(getattr(message, "tool_call_id", ""))
+        for message in tool_messages or []
+        if isinstance(message, ToolMessage) and getattr(message, "tool_call_id", None)
+    ]
+    missing_ids = [
+        tool_call_id for tool_call_id in required_ids
+        if tool_call_id not in by_id
+    ]
+
+    completed: list[ToolMessage] = []
+    for tool_call in getattr(ai_message, "tool_calls", []) or []:
+        tool_call_id = str(tool_call.get("id") or "")
+        if not tool_call_id:
+            continue
+        existing = by_id.get(tool_call_id)
+        if existing is not None:
+            completed.append(existing)
+            continue
+        completed.append(ToolMessage(
+            content=(
+                "TOOL_GROUP_ATOMICITY_ERROR: tool execution did not produce "
+                f"a result for tool_call_id={tool_call_id}."
+            ),
+            tool_call_id=tool_call_id,
+            name=str(tool_call.get("name") or ""),
+            additional_kwargs={
+                "is_error": True,
+                "synthetic_close": True,
+                "error_code": "TOOL_GROUP_ATOMICITY_ERROR",
+                "tool_group_flush_reason": flush_reason,
+                "required_tool_call_ids": required_ids,
+                "received_tool_result_ids": received_ids,
+                "missing_tool_result_ids": missing_ids,
+            },
+        ))
+    return completed
 
 
 def with_runtime_message_id(part: dict[str, Any], runtime_message_id: str | None) -> dict[str, Any]:

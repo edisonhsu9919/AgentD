@@ -130,6 +130,13 @@ class Settings(BaseSettings):
         default="",
         description="Debug flag. Any non-empty value enables debug logging (e.g. 'true', 'release').",
     )
+    message_persist_atomic_tool_group: bool = Field(
+        default=True,
+        description=(
+            "Persist ordinary assistant tool_call messages together with their "
+            "matching tool_result messages instead of writing half-open DB projections."
+        ),
+    )
 
     # ── Seed admin ──────────────────────────────────────────────────────────
     # Only used on first startup when the users table is empty.

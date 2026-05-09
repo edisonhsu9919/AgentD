@@ -69,7 +69,8 @@ def snapshot_is_open_hitl_interrupt(snapshot) -> bool:
         return False
 
     interrupt_ids = set(extract_tool_call_ids(snapshot))
-    if interrupt_ids and not set(group["missing_ids"]).issubset(interrupt_ids):
+    missing_ids = set(group["missing_ids"])
+    if interrupt_ids and not missing_ids.intersection(interrupt_ids):
         return False
 
     from agent.runtime import _HITL_INTERRUPT_ON
@@ -79,7 +80,10 @@ def snapshot_is_open_hitl_interrupt(snapshot) -> bool:
         for tc in getattr(group["ai_message"], "tool_calls", []) or []
         if tc.get("id")
     }
-    for tool_call_id in group["missing_ids"]:
+    hitl_candidate_ids = interrupt_ids.intersection(missing_ids) if interrupt_ids else missing_ids
+    if not hitl_candidate_ids:
+        return False
+    for tool_call_id in hitl_candidate_ids:
         tool_call = tool_calls_by_id.get(tool_call_id) or {}
         if tool_call.get("name") not in _HITL_INTERRUPT_ON:
             return False

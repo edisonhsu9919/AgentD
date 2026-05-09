@@ -305,6 +305,10 @@ class RuntimeIntegrityGate:
 
     @classmethod
     def decide_prompt_ingress(cls, payload: RuntimeIntegrityInput) -> RuntimeGateDecision:
+        checkpoint_decision = cls._checkpoint_truth_prompt_decision(payload)
+        if checkpoint_decision is not None:
+            return checkpoint_decision
+
         terminal = cls.decide_terminal(payload)
         if terminal.action == RuntimeGateAction.FINALIZE_IDLE:
             return terminal
@@ -324,6 +328,46 @@ class RuntimeIntegrityGate:
             run_end_seq=terminal.run_end_seq,
             expanded_from_seq=terminal.expanded_from_seq,
             full_confirmation_result=terminal.full_confirmation_result,
+        )
+
+    @classmethod
+    def _checkpoint_truth_prompt_decision(
+        cls,
+        payload: RuntimeIntegrityInput,
+    ) -> RuntimeGateDecision | None:
+        """Allow prompt ingress from clean checkpoint truth despite dirty DB projection."""
+        state = payload.checkpoint_state
+        if state is None or not state.checkpoint_valid:
+            return None
+        if payload.session_status in {"queued", "running", "waiting", "subtask_waiting"}:
+            return None
+        if payload.pending_permissions:
+            return None
+        if state.state_kind not in {
+            CheckpointStateKind.EMPTY,
+            CheckpointStateKind.PROVIDER_READY,
+        }:
+            return None
+        if _checkpoint_has_active_next(state) and state.state_kind != CheckpointStateKind.PROVIDER_READY:
+            return None
+
+        tail = inspect_db_transcript_tail(payload.db_tail_messages)
+        return RuntimeGateDecision(
+            action=RuntimeGateAction.FINALIZE_IDLE,
+            reason="checkpoint_clean_prompt_ingress",
+            open_tool_call_ids=[],
+            checkpoint_state_kind=state.state_kind.value,
+            is_provider_payload_ready=state.is_provider_payload_ready,
+            requires_human_input=False,
+            can_accept_user_prompt=True,
+            db_tail_seq=tail.tail_seq,
+            invalid_indices=tail.invalid_indices,
+            pending_permission_count=0,
+            validation_scope=payload.validation_scope,
+            run_start_seq=payload.run_start_seq,
+            run_end_seq=payload.run_end_seq,
+            expanded_from_seq=payload.expanded_from_seq,
+            full_confirmation_result=payload.full_confirmation_result,
         )
 
     @staticmethod

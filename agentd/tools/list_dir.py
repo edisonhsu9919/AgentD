@@ -5,8 +5,12 @@ user's workspace. Safer and more structured than `bash ls/tree`.
 """
 
 import os
-from typing import Any, Optional
+from typing import Any
 
+from tools.arg_normalization import (
+    ToolArgumentValidationError,
+    normalize_workspace_path_arg,
+)
 from tools.base import BaseTool, ToolContext
 from workspace.manager import validate_path
 
@@ -21,7 +25,9 @@ class ListDirTool(BaseTool):
         return (
             "List files and directories in the workspace. "
             "Returns a structured tree view. "
-            "Use this instead of 'bash ls' for cleaner, safer output."
+            "Use this instead of 'bash ls' for cleaner, safer output. "
+            "Pass raw JSON strings; do not wrap path in shell quotes. "
+            "For the current session directory, omit path or use '.'."
         )
 
     @property
@@ -55,7 +61,14 @@ class ListDirTool(BaseTool):
         }
 
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
-        path: str = kwargs.get("path") or "."
+        try:
+            path = normalize_workspace_path_arg(
+                kwargs.get("path"),
+                workspace_dir=ctx.workspace_dir,
+                optional_current_dir=True,
+            )
+        except ToolArgumentValidationError as e:
+            return {"output": str(e), "is_error": True}
         max_depth: int = kwargs.get("max_depth") or 3
 
         try:

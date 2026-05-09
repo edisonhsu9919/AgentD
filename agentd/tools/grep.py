@@ -8,6 +8,11 @@ import os
 import re
 from typing import Any
 
+from tools.arg_normalization import (
+    ToolArgumentValidationError,
+    normalize_string_arg,
+    normalize_workspace_path_arg,
+)
 from tools.base import BaseTool, ToolContext
 from workspace.manager import validate_path
 
@@ -40,7 +45,9 @@ class GrepTool(BaseTool):
     def description(self) -> str:
         return (
             "Search file contents in the workspace for a regex pattern. "
-            "Returns matching lines with file paths and line numbers."
+            "Returns matching lines with file paths and line numbers. "
+            "Pass raw JSON strings; do not wrap path, pattern, or include in shell quotes. "
+            "For the current session directory, omit path or use '.'."
         )
 
     @property
@@ -78,9 +85,23 @@ class GrepTool(BaseTool):
         }
 
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
-        pattern_str: str = kwargs["pattern"]
-        path: str = kwargs.get("path") or "."
-        include: str = kwargs.get("include") or ""
+        try:
+            pattern_str = normalize_string_arg(
+                kwargs.get("pattern"),
+                field_name="pattern",
+            )
+            path = normalize_workspace_path_arg(
+                kwargs.get("path"),
+                workspace_dir=ctx.workspace_dir,
+                optional_current_dir=True,
+            )
+            include = normalize_string_arg(
+                kwargs.get("include"),
+                field_name="include",
+                allow_empty=True,
+            )
+        except ToolArgumentValidationError as e:
+            return {"output": str(e), "is_error": True}
 
         try:
             regex = re.compile(pattern_str)

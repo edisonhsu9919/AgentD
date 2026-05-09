@@ -83,6 +83,24 @@ class TestListDirTool:
         assert "sub/" in result["output"]
 
     @pytest.mark.asyncio
+    async def test_quoted_current_dir_is_normalized(self, tool, ctx):
+        result = await tool.execute(ctx, path='"."')
+        assert result["is_error"] is False
+        assert "src/" in result["output"]
+
+    @pytest.mark.asyncio
+    async def test_null_like_path_is_current_dir(self, tool, ctx):
+        result = await tool.execute(ctx, path="null")
+        assert result["is_error"] is False
+        assert "src/" in result["output"]
+
+    @pytest.mark.asyncio
+    async def test_workspace_absolute_path_is_normalized(self, tool, ctx, workspace):
+        result = await tool.execute(ctx, path=str(workspace))
+        assert result["is_error"] is False
+        assert "config.json" in result["output"]
+
+    @pytest.mark.asyncio
     async def test_depth_limiting(self, tool, ctx):
         result = await tool.execute(ctx, max_depth=1)
         assert result["is_error"] is False
@@ -147,6 +165,18 @@ class TestGlobTool:
         assert "main.py" in result["output"]
 
     @pytest.mark.asyncio
+    async def test_quoted_pattern_and_empty_path_are_normalized(self, tool, ctx):
+        result = await tool.execute(ctx, pattern='"*.json"', path='""')
+        assert result["is_error"] is False
+        assert "config.json" in result["output"]
+
+    @pytest.mark.asyncio
+    async def test_null_like_path_is_current_dir(self, tool, ctx):
+        result = await tool.execute(ctx, pattern="*.json", path="undefined")
+        assert result["is_error"] is False
+        assert "config.json" in result["output"]
+
+    @pytest.mark.asyncio
     async def test_hidden_files_excluded(self, tool, ctx):
         result = await tool.execute(ctx, pattern="**/*")
         assert result["is_error"] is False
@@ -195,6 +225,25 @@ class TestGrepTool:
         assert "docs/readme.md" in result["output"]
         # Should not include .py files
         assert "main.py" not in result["output"]
+
+    @pytest.mark.asyncio
+    async def test_quoted_args_are_normalized(self, tool, ctx):
+        result = await tool.execute(ctx, pattern='"Project"', path='"docs"', include='"*.md"')
+        assert result["is_error"] is False
+        assert "docs/readme.md" in result["output"]
+
+    @pytest.mark.asyncio
+    async def test_null_like_path_is_current_dir_but_pattern_remains_literal(self, tool, ctx, workspace):
+        (workspace / "null.txt").write_text("literal null token\n")
+        result = await tool.execute(ctx, pattern="null", path="None", include="*.txt")
+        assert result["is_error"] is False
+        assert "null.txt" in result["output"]
+
+    @pytest.mark.asyncio
+    async def test_prompt_contaminated_path_is_rejected(self, tool, ctx):
+        result = await tool.execute(ctx, pattern="Project", path="path: docs\nthen grep")
+        assert result["is_error"] is True
+        assert "TOOL_ARGUMENT_VALIDATION_ERROR" in result["output"]
 
     @pytest.mark.asyncio
     async def test_search_single_file(self, tool, ctx):

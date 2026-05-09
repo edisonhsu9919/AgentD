@@ -322,6 +322,47 @@ def test_prompt_ingress_rejects_open_runtime_state():
     assert decision.can_accept_user_prompt is False
 
 
+def test_prompt_ingress_allows_clean_checkpoint_with_db_only_dirty_tail():
+    checkpoint = classify_checkpoint(
+        messages=[HumanMessage(content="hi"), AIMessage(content="done")],
+        next_nodes=[],
+    )
+
+    decision = RuntimeIntegrityGate.decide_prompt_ingress(_payload(
+        checkpoint,
+        [_db_message(60, "assistant", [_tool_call_part("call_edit", "file_edit")])],
+    ))
+
+    assert decision.action == RuntimeGateAction.FINALIZE_IDLE
+    assert decision.reason == "checkpoint_clean_prompt_ingress"
+    assert decision.can_accept_user_prompt is True
+    assert decision.open_tool_call_ids == []
+
+
+def test_prompt_ingress_still_rejects_checkpoint_open_hitl():
+    checkpoint = classify_checkpoint(
+        messages=[
+            HumanMessage(content="write"),
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "call_write", "name": "file_write", "args": {}}],
+            ),
+        ],
+        next_nodes=["HumanInTheLoopMiddleware.after_model"],
+        interrupts=[SimpleNamespace(value={"tool_call_ids": ["call_write"]})],
+    )
+
+    decision = RuntimeIntegrityGate.decide_prompt_ingress(_payload(
+        checkpoint,
+        [],
+        pending=[SimpleNamespace(tool_call_id="call_write", status="pending")],
+    ))
+
+    assert decision.action == RuntimeGateAction.REJECT_NEW_PROMPT
+    assert decision.requires_human_input is True
+    assert decision.open_tool_call_ids == ["call_write"]
+
+
 def test_subtask_waiting_is_not_final_idle():
     decision = RuntimeIntegrityGate.decide_terminal(_payload(
         None,

@@ -7,11 +7,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from agent.message_persistence import (
+    build_persistable_message_parts,
+    complete_tool_group_messages,
     load_existing_part_keys,
     part_dedupe_keys,
+    persist_tool_group_atomic,
     persist_runtime_message_once,
     projection_can_append,
 )
@@ -269,3 +272,123 @@ async def test_persist_runtime_message_once_appends_matching_tool_result_in_open
 
     assert persisted is True
     create_message.assert_awaited_once()
+
+
+def test_complete_tool_group_messages_synthesizes_missing_result():
+    ai_message = AIMessage(
+        content="",
+        tool_calls=[
+            {"id": "call_a", "name": "list_dir", "args": {"path": "."}},
+            {"id": "call_b", "name": "grep", "args": {"pattern": "x"}},
+        ],
+    )
+    tool_messages = [
+        ToolMessage(content="ok", tool_call_id="call_a", name="list_dir"),
+    ]
+
+    completed = complete_tool_group_messages(
+        ai_message,
+        tool_messages,
+        flush_reason="stream_end_incomplete_tool_group",
+    )
+
+    assert [message.tool_call_id for message in completed] == ["call_a", "call_b"]
+    assert completed[0].content == "ok"
+    assert "TOOL_GROUP_ATOMICITY_ERROR" in completed[1].content
+    assert completed[1].additional_kwargs["is_error"] is True
+    assert completed[1].additional_kwargs["synthetic_close"] is True
+    assert completed[1].additional_kwargs["error_code"] == "TOOL_GROUP_ATOMICITY_ERROR"
+    assert completed[1].additional_kwargs["tool_group_flush_reason"] == "stream_end_incomplete_tool_group"
+    assert completed[1].additional_kwargs["required_tool_call_ids"] == ["call_a", "call_b"]
+    assert completed[1].additional_kwargs["received_tool_result_ids"] == ["call_a"]
+    assert completed[1].additional_kwargs["missing_tool_result_ids"] == ["call_b"]
+
+
+def test_synthetic_tool_result_part_keeps_atomicity_metadata():
+    tool_message = ToolMessage(
+        content="TOOL_GROUP_ATOMICITY_ERROR: missing",
+        tool_call_id="call_b",
+        name="grep",
+        additional_kwargs={
+            "is_error": True,
+            "synthetic_close": True,
+            "error_code": "TOOL_GROUP_ATOMICITY_ERROR",
+            "tool_group_flush_reason": "stream_end_incomplete_tool_group",
+            "required_tool_call_ids": ["call_a", "call_b"],
+            "received_tool_result_ids": ["call_a"],
+            "missing_tool_result_ids": ["call_b"],
+        },
+    )
+
+    role, parts, _is_summary = build_persistable_message_parts(tool_message)
+
+    assert role == "tool"
+    assert parts[0]["is_error"] is True
+    assert parts[0]["synthetic_close"] is True
+    assert parts[0]["error_code"] == "TOOL_GROUP_ATOMICITY_ERROR"
+    assert parts[0]["tool_group_flush_reason"] == "stream_end_incomplete_tool_group"
+    assert parts[0]["missing_tool_result_ids"] == ["call_b"]
+
+
+@pytest.mark.asyncio
+async def test_persist_tool_group_atomic_writes_assistant_and_all_results(monkeypatch):
+    session_id = uuid.uuid4()
+    created: list[tuple[str, list[dict]]] = []
+
+    class FakeDb:
+        commits = 0
+        rollbacks = 0
+
+        async def commit(self):
+            self.commits += 1
+
+        async def rollback(self):
+            self.rollbacks += 1
+
+    fake_db = FakeDb()
+
+    class FakeSession:
+        async def __aenter__(self):
+            return fake_db
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    async def fake_create_message(_db, *, session_id, role, parts, is_summary=False):
+        created.append((role, parts))
+
+    monkeypatch.setattr(
+        "agent.message_persistence.AsyncSessionLocal",
+        lambda: FakeSession(),
+    )
+    monkeypatch.setattr(
+        "agent.message_persistence.session_svc.list_messages",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        "agent.message_persistence.session_svc.create_message",
+        fake_create_message,
+    )
+
+    await persist_tool_group_atomic(
+        str(session_id),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"id": "call_a", "name": "list_dir", "args": {"path": "."}},
+                {"id": "call_b", "name": "grep", "args": {"pattern": "x"}},
+            ],
+        ),
+        [
+            ToolMessage(content="files", tool_call_id="call_a", name="list_dir"),
+            ToolMessage(content="matches", tool_call_id="call_b", name="grep"),
+        ],
+    )
+
+    assert [role for role, _parts in created] == ["assistant", "tool", "tool"]
+    assert created[0][1][0]["type"] == "tool_call"
+    assert created[0][1][0]["tool_call_id"] == "call_a"
+    assert created[1][1][0]["tool_call_id"] == "call_a"
+    assert created[2][1][0]["tool_call_id"] == "call_b"
+    assert fake_db.commits == 1
+    assert fake_db.rollbacks == 0

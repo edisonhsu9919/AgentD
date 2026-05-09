@@ -86,6 +86,62 @@ class RecoverableProviderTimeout(RuntimeError):
         super().__init__(self.provider_error)
 
 
+class ToolGroupAccumulator:
+    """Collect parallel tool results until a whole assistant tool group closes."""
+
+    def __init__(self) -> None:
+        self.ai_message: AIMessage | None = None
+        self.required_ids: list[str] = []
+        self.results_by_id: dict[str, ToolMessage] = {}
+
+    @property
+    def active(self) -> bool:
+        return self.ai_message is not None and bool(self.required_ids)
+
+    def start(self, ai_message: AIMessage) -> None:
+        self.ai_message = ai_message
+        self.required_ids = [
+            str(tool_call.get("id") or "")
+            for tool_call in getattr(ai_message, "tool_calls", []) or []
+            if tool_call.get("id")
+        ]
+        self.results_by_id = {}
+
+    def add(self, tool_messages: list[ToolMessage]) -> None:
+        for message in tool_messages or []:
+            tool_call_id = getattr(message, "tool_call_id", None)
+            if not tool_call_id:
+                continue
+            key = str(tool_call_id)
+            if key not in self.results_by_id:
+                self.results_by_id[key] = message
+
+    def is_complete(self) -> bool:
+        return self.active and all(
+            tool_call_id in self.results_by_id
+            for tool_call_id in self.required_ids
+        )
+
+    def complete_messages(self) -> list[ToolMessage]:
+        return [
+            self.results_by_id[tool_call_id]
+            for tool_call_id in self.required_ids
+            if tool_call_id in self.results_by_id
+        ]
+
+    def missing_ids(self) -> list[str]:
+        return [
+            tool_call_id
+            for tool_call_id in self.required_ids
+            if tool_call_id not in self.results_by_id
+        ]
+
+    def clear(self) -> None:
+        self.ai_message = None
+        self.required_ids = []
+        self.results_by_id = {}
+
+
 async def execute_start(
     session_id: str,
     user_id: str,
@@ -477,8 +533,9 @@ async def _stream_and_translate(
     - "messages": yields AIMessageChunk per token → text_delta (requires streaming=True)
     - "updates": yields complete node outputs → tool_start / tool_result
 
-    Phase L: Also incrementally persists tool_call and tool_result messages
-    to the messages table as they occur, rather than waiting for _finalize().
+    v0.4.8: ordinary tool_call/tool_result groups are persisted atomically
+    after the tools node completes. SSE still carries live tool_start/tool_result
+    events; canonical DB transcript no longer stores half-open ordinary groups.
     Phase L: Checks abort at node boundaries (after each model/tools node).
 
     Returns True if aborted mid-stream, False otherwise.
@@ -489,6 +546,26 @@ async def _stream_and_translate(
     current_provider_state: dict[str, Any] = {}
     current_tool_messages: list[ToolMessage] = []
     current_tool_call_message: AIMessage | None = None
+    tool_group_accumulator = ToolGroupAccumulator()
+
+    async def flush_tool_group(reason: str) -> None:
+        nonlocal current_tool_messages
+        if (
+            not settings.message_persist_atomic_tool_group
+            or not tool_group_accumulator.active
+            or tool_group_accumulator.ai_message is None
+        ):
+            return
+        all_messages = tool_group_accumulator.complete_messages()
+        current_tool_messages = all_messages
+        agent._last_tool_messages = all_messages
+        await _persist_tool_group_atomic(
+            session_id,
+            tool_group_accumulator.ai_message,
+            all_messages,
+            flush_reason=reason,
+        )
+        tool_group_accumulator.clear()
 
     async for mode, data in agent.astream(
         input_data, config=config, stream_mode=["messages", "updates"],
@@ -533,6 +610,7 @@ async def _stream_and_translate(
                     continue
 
                 if node_name == "model":
+                    await flush_tool_group("before_next_model_update")
                     # Phase P4-A: reset per-turn result accumulator for the new model turn
                     from tools.registry import reset_turn_accumulator
                     reset_turn_accumulator(session_id)
@@ -583,8 +661,11 @@ async def _stream_and_translate(
                             merge_provider_state_final(merged_kwargs, current_provider_state)
                             msg.additional_kwargs = merged_kwargs
                         if hasattr(msg, "tool_calls") and msg.tool_calls:
+                            await flush_tool_group("before_next_model_tool_group")
                             current_tool_call_message = msg
                             agent._last_tool_call_message = msg
+                            if settings.message_persist_atomic_tool_group:
+                                tool_group_accumulator.start(msg)
                             for tc in msg.tool_calls:
                                 await publish(session_id, {
                                     "event": "tool_start",
@@ -592,8 +673,8 @@ async def _stream_and_translate(
                                     "tool_name": tc["name"],
                                     "input": tc.get("args", {}),
                                 })
-                            # Phase L: incrementally persist AIMessage with tool_calls
-                            await _persist_message_incremental(session_id, msg)
+                            if not settings.message_persist_atomic_tool_group:
+                                await _persist_message_incremental(session_id, msg)
 
                 elif node_name == "tools":
                     # Flush any buffered text before switching to tool results
@@ -621,14 +702,23 @@ async def _stream_and_translate(
                             "output": content,
                             "is_error": is_error,
                         })
-                    # Phase L: incrementally persist all ToolMessages from this node
                     current_tool_messages = [
                         msg for msg in messages if isinstance(msg, ToolMessage)
                     ]
+                    if (
+                        settings.message_persist_atomic_tool_group
+                        and tool_group_accumulator.active
+                    ):
+                        tool_group_accumulator.add(current_tool_messages)
+                        current_tool_messages = tool_group_accumulator.complete_messages()
                     agent._last_tool_messages = current_tool_messages
-                    for msg in messages:
-                        if isinstance(msg, ToolMessage):
-                            await _persist_message_incremental(session_id, msg)
+                    if settings.message_persist_atomic_tool_group:
+                        if tool_group_accumulator.is_complete():
+                            await flush_tool_group("complete_tool_group")
+                    else:
+                        for msg in messages:
+                            if isinstance(msg, ToolMessage):
+                                await _persist_message_incremental(session_id, msg)
 
             # Phase L: check abort at node boundaries (after each updates batch)
             if check_abort and await check_abort():
@@ -647,6 +737,18 @@ async def _stream_and_translate(
                     candidate_tool_messages=current_tool_messages,
                 )
                 return True
+
+    if tool_group_accumulator.active:
+        try:
+            end_snapshot = await agent.aget_state(config)
+        except Exception:
+            end_snapshot = None
+        if end_snapshot is not None and _snapshot_is_open_hitl_interrupt(end_snapshot):
+            pass
+        elif await _is_subtask_waiting(session_id):
+            pass
+        else:
+            await flush_tool_group("stream_end_incomplete_tool_group")
 
     # Flush any remaining buffered text after the stream ends
     remaining = think_filter.flush()
@@ -1671,6 +1773,21 @@ async def _persist_message_incremental(session_id: str, msg) -> None:
     Uses its own DB session + commit for isolation from the main flow.
     """
     await msg_persist.persist_message_incremental(session_id, msg)
+
+
+async def _persist_tool_group_atomic(
+    session_id: str,
+    ai_message: AIMessage,
+    tool_messages: list[ToolMessage],
+    *,
+    flush_reason: str = "complete_tool_group",
+) -> None:
+    await msg_persist.persist_tool_group_atomic(
+        session_id,
+        ai_message,
+        tool_messages,
+        flush_reason=flush_reason,
+    )
 
 
 async def _persist_messages(session_id: str, messages: list) -> None:

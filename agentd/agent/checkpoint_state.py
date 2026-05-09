@@ -87,10 +87,15 @@ def classify_checkpoint(
     interrupt_ids = set(extract_interrupt_tool_call_ids(interrupts))
     missing_ids = set(analysis.orphan_tool_call_ids)
     is_hitl_next = any("HumanInTheLoopMiddleware.after_model" in node for node in next_nodes)
+    hitl_open_ids = (
+        [tool_call_id for tool_call_id in analysis.orphan_tool_call_ids if tool_call_id in interrupt_ids]
+        if interrupt_ids
+        else list(analysis.orphan_tool_call_ids)
+    )
     open_hitl = bool(missing_ids) and (
         bool(interrupts) or is_hitl_next
     ) and (
-        not interrupt_ids or missing_ids.issubset(interrupt_ids)
+        not interrupt_ids or bool(missing_ids.intersection(interrupt_ids))
     )
 
     if open_hitl:
@@ -103,7 +108,7 @@ def classify_checkpoint(
             next_nodes=next_nodes,
             interrupt_count=len(interrupts),
             bad_indices=[],
-            open_tool_call_ids=analysis.orphan_tool_call_ids,
+            open_tool_call_ids=hitl_open_ids,
             closed_tool_call_ids=analysis.closed_tool_call_ids,
             orphan_tool_call_ids=analysis.orphan_tool_call_ids,
             orphan_tool_message_ids=[],

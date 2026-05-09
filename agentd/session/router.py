@@ -551,7 +551,9 @@ async def _enforce_prompt_runtime_integrity_gate(
                     projection,
                     repair,
                 )
-            await db.flush()
+                await db.commit()
+            else:
+                await db.flush()
     except Exception:
         logger.exception("Failed to run prompt ingress projection repair")
     validation = await load_terminal_validation_messages(
