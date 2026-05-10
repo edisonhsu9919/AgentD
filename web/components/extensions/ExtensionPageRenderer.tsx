@@ -11,6 +11,7 @@ import type {
   DomainExtensionItem,
   ExtensionPageSchema,
 } from "@/lib/types";
+import ClauseLibraryPage from "./ClauseLibraryPage";
 
 export default function ExtensionPageRenderer({ name }: { name: string }) {
   const extensions = useExtensionStore((s) => s.extensions);
@@ -119,6 +120,10 @@ export default function ExtensionPageRenderer({ name }: { name: string }) {
         extension={extension}
       />
     );
+  }
+
+  if (extension.name === "agentd-insurance-clauses") {
+    return <ClauseLibraryPage />;
   }
 
   if (!extension.frontend?.page_schema_endpoint) {

@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
@@ -28,6 +29,15 @@ from core.response import ok
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _can_access_doc(fm: dict, current_user: User) -> bool:
+    """Return whether a user can read a knowledge document."""
+    if current_user.role == "admin":
+        return True
+    if fm.get("permission", "private") == "public":
+        return True
+    return fm.get("owner") == str(current_user.id)
 
 
 # ── Knowledge catalog (frontend) ────────────────────────────────────────────
@@ -107,15 +117,7 @@ async def get_knowledge_document(
 
     Permission check: only returns if document is public or owned by user.
     """
-    from knowledge.store import read_knowledge_doc, list_knowledge_docs
-
-    # Permission check
-    visible_ids = {d["doc_id"] for d in list_knowledge_docs(user_id=str(current_user.id))}
-    if doc_id not in visible_ids:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"code": "NOT_FOUND", "message": "Document not found or access denied"},
-        )
+    from knowledge.store import read_knowledge_doc
 
     result = read_knowledge_doc(doc_id)
     if result is None:
@@ -125,6 +127,12 @@ async def get_knowledge_document(
         )
 
     fm, body = result
+    if not _can_access_doc(fm, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Document not found or access denied"},
+        )
+
     response = {
         "doc_id": doc_id,
         **fm,
@@ -156,18 +164,9 @@ async def resolve_knowledge_source(
     """
     from knowledge.store import (
         read_knowledge_doc,
-        list_knowledge_docs,
         get_raw_file_path,
         get_files_dir,
     )
-
-    # Permission check
-    visible_ids = {d["doc_id"] for d in list_knowledge_docs(user_id=str(current_user.id))}
-    if doc_id not in visible_ids:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"code": "NOT_FOUND", "message": "Source not found or access denied"},
-        )
 
     result = read_knowledge_doc(doc_id)
     if result is None:
@@ -177,6 +176,12 @@ async def resolve_knowledge_source(
         )
 
     fm, _body = result
+    if not _can_access_doc(fm, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Source not found or access denied"},
+        )
+
     source_file = fm.get("source_file", "")
     raw_path = get_raw_file_path(source_file) if source_file else None
 
@@ -208,10 +213,14 @@ async def download_raw_file(
     that references this raw file.
     """
     import mimetypes
-    from knowledge.store import list_knowledge_docs, get_raw_file_path
+    from knowledge.store import get_raw_file_path, list_knowledge_docs
 
     # Permission check: find a visible doc that references this file
-    visible_docs = list_knowledge_docs(user_id=str(current_user.id))
+    visible_docs = (
+        _list_all_docs_admin()
+        if current_user.role == "admin"
+        else list_knowledge_docs(user_id=str(current_user.id))
+    )
     authorized = any(d.get("source_file") == filename for d in visible_docs)
 
     if not authorized:
@@ -306,7 +315,7 @@ class KnowledgeImportRequest(BaseModel):
     title: str
     description: str = ""
     tags: str = ""
-    permission: str = "private"
+    permission: Literal["public", "private"] = "private"
 
 
 @router.post("/import", status_code=status.HTTP_202_ACCEPTED)

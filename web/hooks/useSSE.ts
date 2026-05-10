@@ -27,6 +27,7 @@ const TYPING_SPEED_THRESHOLD = 60;
 export function useSSE(sessionId: string | null) {
   const prevId = useRef<string | null>(null);
   const lastEventAtRef = useRef<number>(0);
+  const delayedSessionsRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // --- Typing effect buffer (ref-based, no re-render on append) ---
   const bufferRef = useRef("");
@@ -91,6 +92,32 @@ export function useSSE(sessionId: string | null) {
     stopTypingLoop();
     bufferRef.current = "";
   }, [stopTypingLoop]);
+
+  const clearDelayedSessionsRefresh = useCallback(() => {
+    if (delayedSessionsRefreshRef.current) {
+      clearTimeout(delayedSessionsRefreshRef.current);
+      delayedSessionsRefreshRef.current = null;
+    }
+  }, []);
+
+  const scheduleTitleReconcile = useCallback((activeSessionId: string) => {
+    const currentTitle = useSessionStore
+      .getState()
+      .sessions.find((session) => session.id === activeSessionId)?.title;
+    const needsReconcile =
+      !currentTitle ||
+      currentTitle === "New Session" ||
+      currentTitle === "未命名会话";
+    if (!needsReconcile) return;
+
+    clearDelayedSessionsRefresh();
+    delayedSessionsRefreshRef.current = setTimeout(() => {
+      delayedSessionsRefreshRef.current = null;
+      if (prevId.current === activeSessionId) {
+        fetchSessions();
+      }
+    }, 1500);
+  }, [clearDelayedSessionsRefresh, fetchSessions]);
 
   /** Start the typing render loop if not already running */
   const startTypingLoop = useCallback(() => {
@@ -210,6 +237,7 @@ export function useSSE(sessionId: string | null) {
           break;
 
         case "title_update":
+          clearDelayedSessionsRefresh();
           updateSessionTitle(sessionId, event.title);
           break;
 
@@ -239,6 +267,7 @@ export function useSSE(sessionId: string | null) {
             clearStreaming();
           });
           fetchSessions();
+          scheduleTitleReconcile(sessionId);
           fetchRuntime(sessionId);
           fetchTree(sessionId);
           fetchTaskPlan(sessionId);
@@ -320,6 +349,7 @@ export function useSSE(sessionId: string | null) {
     return () => {
       disconnectSSE();
       clearBuffer();
+      clearDelayedSessionsRefresh();
       prevId.current = null;
     };
   }, [
@@ -350,6 +380,8 @@ export function useSSE(sessionId: string | null) {
     startTypingLoop,
     flushBuffer,
     clearBuffer,
+    clearDelayedSessionsRefresh,
+    scheduleTitleReconcile,
   ]);
 
   // ---------------------------------------------------------------

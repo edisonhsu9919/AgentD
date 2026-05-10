@@ -13,12 +13,21 @@ class EventBus:
     """Manages per-session event queues."""
 
     def __init__(self):
-        self._queues: dict[str, asyncio.Queue] = {}
+        self._subscribers: dict[str, set[asyncio.Queue]] = {}
 
-    def _get_or_create(self, session_id: str) -> asyncio.Queue:
-        if session_id not in self._queues:
-            self._queues[session_id] = asyncio.Queue()
-        return self._queues[session_id]
+    @property
+    def _queues(self) -> dict[str, asyncio.Queue]:
+        """Backward-compatible view for older tests/debug code.
+
+        New code should treat EventBus as a broadcast bus. This property exposes
+        one representative queue per session so legacy introspection does not
+        break while preventing new code from relying on a single shared queue.
+        """
+        return {
+            session_id: next(iter(queues))
+            for session_id, queues in self._subscribers.items()
+            if queues
+        }
 
     async def publish(self, session_id: str, event: dict[str, Any]) -> None:
         """Push an event into the session's queue.
@@ -27,16 +36,26 @@ class EventBus:
         """
         event.setdefault("session_id", session_id)
         event.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
-        q = self._get_or_create(session_id)
-        await q.put(event)
+        for q in list(self._subscribers.get(session_id, set())):
+            await q.put(dict(event))
 
     async def subscribe(self, session_id: str) -> asyncio.Queue:
-        """Return the queue for a session (creates if needed)."""
-        return self._get_or_create(session_id)
+        """Return a dedicated subscriber queue for a session."""
+        q: asyncio.Queue = asyncio.Queue()
+        self._subscribers.setdefault(session_id, set()).add(q)
+        return q
 
-    def remove(self, session_id: str) -> None:
-        """Clean up the queue when a session's SSE connection closes."""
-        self._queues.pop(session_id, None)
+    def remove(self, session_id: str, queue: asyncio.Queue | None = None) -> None:
+        """Clean up a subscriber queue when an SSE connection closes."""
+        if queue is None:
+            self._subscribers.pop(session_id, None)
+            return
+        subscribers = self._subscribers.get(session_id)
+        if not subscribers:
+            return
+        subscribers.discard(queue)
+        if not subscribers:
+            self._subscribers.pop(session_id, None)
 
 
 # Module-level singleton

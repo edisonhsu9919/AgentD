@@ -109,7 +109,7 @@ function FormState({
   const [title, setTitle] = useState(draft.title);
   const [description, setDescription] = useState(draft.description);
   const [tags, setTags] = useState(Array.isArray(draft.tags) ? draft.tags.join(", ") : "");
-  const [permission, setPermission] = useState<"public" | "private">("private");
+  const [permission, setPermission] = useState<"public" | "private">(draft.permission ?? "private");
   const maxDesc = draft.limits?.description_max_chars || 200;
 
   const handleConfirm = async () => {

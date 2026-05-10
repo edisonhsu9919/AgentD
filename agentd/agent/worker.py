@@ -23,6 +23,7 @@ from agent import scheduler
 from agent.executor import RecoverableProviderTimeout, execute_continue, execute_resume, execute_start
 from agent.runtime_integrity import (
     RuntimeGateAction,
+    RuntimeGateDecision,
     RuntimeIntegrityError,
     decide_terminal_with_layered_validation,
     persist_runtime_integrity_diagnostics,
@@ -397,7 +398,13 @@ class AgentWorker:
         session_id: str,
         run_id: uuid.UUID | None = None,
     ) -> None:
-        """Guard scheduler completion against obvious session state drift."""
+        """Reconcile session status to the runtime gate decision.
+
+        v0.4.9 Phase A: this guard is now fail-soft. A run that finishes with a
+        non-terminal session status is corrected in place instead of escalated
+        into ``internal_invariant_violation``. The hard raise was a known
+        secondary kill-shot once any path momentarily set ``status="error"``.
+        """
         try:
             async with AsyncSessionLocal() as db:
                 from unittest.mock import Mock
@@ -411,14 +418,40 @@ class AgentWorker:
 
         status = getattr(session, "status", None)
         if status == "error":
-            raise RuntimeError(
-                "Executor returned after setting session error; refusing to mark run completed"
+            # Fail-soft: executor briefly marked error but the run completed.
+            # Move the session back to idle and let the run be marked completed.
+            print(
+                f"[worker:{self.worker_id}] Session {session_id[:8]} status=error "
+                "after executor returned cleanly; coercing to idle (fail-soft)"
             )
-        if status not in {"idle", "waiting", "subtask_waiting"}:
-            raise RuntimeError(
-                f"Executor returned with non-terminal session status={status!r}; "
-                "refusing to mark run completed"
+            async with AsyncSessionLocal() as db:
+                await session_svc.update_session_status(
+                    db, uuid.UUID(session_id), "idle",
+                )
+                await db.commit()
+            await self._publish(
+                session_id,
+                {"event": "status_change", "status": "idle"},
             )
+            session.status = "idle"
+            status = "idle"
+        elif status not in {"idle", "waiting", "subtask_waiting"}:
+            # Fail-soft: unexpected non-terminal status; coerce to idle.
+            print(
+                f"[worker:{self.worker_id}] Session {session_id[:8]} status="
+                f"{status!r} after executor returned; coercing to idle (fail-soft)"
+            )
+            async with AsyncSessionLocal() as db:
+                await session_svc.update_session_status(
+                    db, uuid.UUID(session_id), "idle",
+                )
+                await db.commit()
+            await self._publish(
+                session_id,
+                {"event": "status_change", "status": "idle"},
+            )
+            session.status = "idle"
+            status = "idle"
 
         try:
             async with AsyncSessionLocal() as db:
@@ -463,7 +496,110 @@ class AgentWorker:
                     {"event": "status_change", "status": "waiting"},
                 )
             return
+        if decision.action == RuntimeGateAction.CONTINUE_MODEL:
+            # v0.4.9 Phase A: a CONTINUE_MODEL decision at run end means the
+            # checkpoint is at next=["model"] after a closed tool_result. This
+            # is not fatal — enqueue a narrow continue so the model finishes
+            # the response. Session becomes queued; status will be reconciled
+            # by the new run.
+            await self._enqueue_terminal_continue_model(session_id, run_id, decision)
+            return
         raise RuntimeIntegrityError(session_id, decision)
+
+    async def _enqueue_terminal_continue_model(
+        self,
+        session_id: str,
+        run_id: uuid.UUID | None,
+        decision: RuntimeGateDecision,
+    ) -> None:
+        """Enqueue a narrow continue when terminal gate returns CONTINUE_MODEL.
+
+        scheduler.enqueue_continue() requires payload to carry both
+        ``mode="retry_model_node"`` and a non-empty ``source_run_id``. When the
+        finishing run has no run_id, we cannot synthesize a valid continue
+        payload, so we fail-soft to idle and record diagnostics instead of
+        enqueueing an invalid continue.
+        """
+        if run_id is None:
+            print(
+                f"[worker:{self.worker_id}] Session {session_id[:8]} terminal gate "
+                f"returned CONTINUE_MODEL ({decision.reason}) but no run_id is "
+                "available; coercing to idle (continue requires source_run_id)."
+            )
+            await self._fail_soft_to_idle_after_continue_skip(
+                session_id,
+                reason="continue_skip_missing_source_run_id",
+                decision=decision,
+            )
+            return
+
+        try:
+            async with AsyncSessionLocal() as db:
+                run = await scheduler.enqueue_continue(
+                    db,
+                    uuid.UUID(session_id),
+                    payload={
+                        "mode": "retry_model_node",
+                        "source_run_id": str(run_id),
+                        "reason": decision.reason,
+                        "checkpoint_state_kind": decision.checkpoint_state_kind,
+                        "trigger": "terminal_gate_continue_model",
+                    },
+                )
+                await session_svc.update_session_status(
+                    db, uuid.UUID(session_id), "queued",
+                )
+                await db.commit()
+            await self._publish(
+                session_id,
+                {
+                    "event": "status_change",
+                    "status": "queued",
+                    "trigger": "terminal_gate_continue_model",
+                    "continue_run_id": str(run.id),
+                },
+            )
+            print(
+                f"[worker:{self.worker_id}] Session {session_id[:8]} terminal gate "
+                f"returned CONTINUE_MODEL ({decision.reason}); enqueued continue run {run.id}"
+            )
+        except Exception:
+            if settings.debug:
+                traceback.print_exc()
+            # Even if continue enqueue fails, do NOT raise integrity error.
+            # Coerce session to idle so user can manually retry.
+            await self._fail_soft_to_idle_after_continue_skip(
+                session_id,
+                reason="continue_enqueue_exception",
+                decision=decision,
+            )
+
+    async def _fail_soft_to_idle_after_continue_skip(
+        self,
+        session_id: str,
+        *,
+        reason: str,
+        decision: RuntimeGateDecision,
+    ) -> None:
+        try:
+            async with AsyncSessionLocal() as db:
+                await session_svc.update_session_status(
+                    db, uuid.UUID(session_id), "idle",
+                )
+                await db.commit()
+            await self._publish(
+                session_id,
+                {
+                    "event": "status_change",
+                    "status": "idle",
+                    "trigger": "terminal_gate_continue_model_fail_soft",
+                    "reason": reason,
+                    "decision_reason": decision.reason,
+                },
+            )
+        except Exception:
+            if settings.debug:
+                traceback.print_exc()
 
     async def _load_terminal_runtime_integrity_decision(
         self,
@@ -549,8 +685,15 @@ class AgentWorker:
                 latest_run_status=getattr(run, "status", None),
                 latest_error=getattr(run, "error", None),
             )
+            # v0.4.9 Phase B: silent projection repair on the worker terminal
+            # path is gated by the rollback flag. With DB tail demoted to
+            # diagnostics-only, the gate never returns "db_tail_open_tool_call"
+            # in the default configuration, so this branch is dead code under
+            # the new contract. We keep it behind the flag so flipping it back
+            # to true still recovers v0.4.4 behaviour for incident response.
             if (
-                decision.action == RuntimeGateAction.FAIL_INTEGRITY_ERROR
+                settings.runtime_integrity_gate_db_tail_enabled
+                and decision.action == RuntimeGateAction.FAIL_INTEGRITY_ERROR
                 and str(decision.reason).startswith("db_tail_open_tool_call")
             ):
                 try:
@@ -1441,15 +1584,22 @@ class AgentWorker:
 
     async def _publish(self, session_id: str, event: dict) -> None:
         """Publish an SSE event via PG NOTIFY (cross-process) + local event_bus fallback."""
+        notify_ok = False
+        notify_error = ""
         # Primary: cross-process via PG NOTIFY
         try:
             from core.event_bridge import notify
             await notify(session_id, event)
+            notify_ok = True
         except Exception as e:
+            notify_error = f"{type(e).__name__}: {e}"
             # Log prominently — silent swallowing here was the root cause of #41
-            print(f"[worker:{self.worker_id}] event_bridge.notify FAILED: {type(e).__name__}: {e}")
+            print(f"[worker:{self.worker_id}] event_bridge.notify FAILED: {notify_error}")
             if settings.debug:
                 traceback.print_exc()
+        event["_event_bridge_notify_ok"] = notify_ok
+        if notify_error:
+            event["_event_bridge_notify_error"] = notify_error
 
         # Secondary: local event_bus (useful when API and worker share the same process)
         try:

@@ -19,7 +19,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-import httpx
+from langchain_core.messages import HumanMessage as LCHumanMessage
 
 logger = logging.getLogger(__name__)
 
@@ -256,50 +256,39 @@ def _build_patch_prompt(current_memory: str, new_messages: list) -> str:
 # ── VLM text call (reuses VLM provider config) ─────────────────────────────
 
 async def _call_compaction_model(prompt: str, max_tokens: int = 4096) -> str | None:
-    """Call the VLM (compaction model) for text-only tasks.
-
-    Returns the model response text, or None on failure.
-    Uses the same VLM config as file_inspect image recon.
-    """
+    """Call the maintenance sidecar model for text-only memory tasks."""
     try:
         from core.database import AsyncSessionLocal
-        from model_config.service import resolve_active_vlm_config
+        from agent.maintenance_model import invoke_maintenance_chat
 
         async with AsyncSessionLocal() as db:
-            resolved = await resolve_active_vlm_config(db)
+            result, resolved = await invoke_maintenance_chat(
+                db,
+                purpose="session_memory",
+                messages=[LCHumanMessage(content=prompt)],
+                max_tokens=max_tokens,
+            )
 
-        if resolved is None:
-            logger.warning("No VLM configured — cannot update session memory")
+        if result is None:
+            logger.warning(
+                "No maintenance model configured for session memory: %s",
+                getattr(resolved, "disabled_reason", "disabled"),
+            )
             return None
 
-        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
-        payload = {
-            "model": resolved.model_id,
-            "messages": messages,
-            "max_tokens": max_tokens,
-        }
-        headers = {"Content-Type": "application/json"}
-        if resolved.api_key:
-            headers["Authorization"] = f"Bearer {resolved.api_key}"
-
-        url = resolved.base_url.rstrip("/") + "/chat/completions"
-
-        async with httpx.AsyncClient(trust_env=False, timeout=60.0) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-
-        if resp.status_code != 200:
-            logger.warning("Compaction model returned %d: %s", resp.status_code, resp.text[:200])
+        content = result.content if isinstance(result.content, str) else ""
+        if not content.strip():
+            logger.warning(
+                "Maintenance model returned empty content for session memory "
+                "(model=%s)",
+                getattr(resolved, "model_id", ""),
+            )
             return None
 
-        body = resp.json()
-        choices = body.get("choices", [])
-        if not choices:
-            return None
-
-        return choices[0].get("message", {}).get("content", "")
+        return content
 
     except Exception as e:
-        logger.warning("Compaction model call failed: %s", e)
+        logger.warning("Session memory maintenance model call failed: %s", e)
         return None
 
 

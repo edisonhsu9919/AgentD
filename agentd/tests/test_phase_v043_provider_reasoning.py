@@ -565,7 +565,7 @@ class TestProviderReasoningHelpers:
         kwargs = build_chatopenai_reasoning_kwargs(resolved)
 
         assert kwargs["extra_body"]["enable_thinking"] is True
-        assert kwargs["model_kwargs"]["thinking_budget"] == 2048
+        assert kwargs["extra_body"]["thinking_budget"] == 2048
 
     def test_provider_chat_payload_maps_glm_enable_thinking(self):
         from agent.provider_reasoning import build_chatopenai_reasoning_kwargs
@@ -582,4 +582,4 @@ class TestProviderReasoningHelpers:
 
         kwargs = build_chatopenai_reasoning_kwargs(resolved)
 
-        assert kwargs["model_kwargs"]["thinking"] == {"type": "disabled"}
+        assert kwargs["extra_body"]["thinking"] == {"type": "disabled"}

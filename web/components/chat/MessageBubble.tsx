@@ -96,8 +96,12 @@ function formatMessageTime(value: string) {
 
 function getVisibleMessageText(message: Message) {
   return message.parts
-    .filter((part) => part.type === "text")
-    .map((part) => (part.type === "text" ? stripThinkTags(part.content) : ""))
+    .filter((part) => part.type === "text" || part.type === "command_result")
+    .map((part) => {
+      if (part.type === "text") return stripThinkTags(part.content);
+      if (part.type === "command_result") return stripThinkTags(part.text);
+      return "";
+    })
     .filter(Boolean)
     .join("\n\n")
     .trim();

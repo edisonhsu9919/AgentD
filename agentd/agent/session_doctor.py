@@ -61,11 +61,16 @@ async def run_session_doctor(
     session: Session,
     dry_run: bool = False,
     publish=None,
+    current_user: Any | None = None,
 ) -> DoctorReport:
     """Inspect and optionally repair obvious stale runtime state.
 
     The doctor is intentionally conservative: it never calls an LLM, never
     retries provider calls, and performs each repair at most once.
+
+    v0.4.9 Phase B: ``current_user`` is now used to load checkpoint state for
+    DB projection consistency checks (it provides ``workspace`` for the agent
+    builder). When omitted, projection inspection skips itself silently.
     """
     lock_result = await _try_session_lock(db, session.id)
     if isinstance(lock_result, tuple):
@@ -87,6 +92,13 @@ async def run_session_doctor(
     await _repair_recoverable_error_session(db, session, report, dry_run=dry_run)
     await _repair_auto_recovery_resolution(db, session, report, dry_run=dry_run)
     await _repair_subtask_waiting(db, session, report, dry_run=dry_run, publish=publish)
+    await _repair_db_projection_ahead(
+        db,
+        session,
+        report,
+        dry_run=dry_run,
+        current_user=current_user,
+    )
 
     return report
 
@@ -319,6 +331,112 @@ async def _repair_subtask_waiting(
             child_session_id=task.child_session_id,
             publish=publish,
         )
+        await _record_doctor_action(db, session.id, action)
+
+
+async def _repair_db_projection_ahead(
+    db: AsyncSession,
+    session: Session,
+    report: DoctorReport,
+    *,
+    dry_run: bool,
+    current_user: Any | None,
+) -> None:
+    """Inspect and (optionally) discard DB-only dangling tool_call projections.
+
+    v0.4.9 Phase B: this runs only via the doctor entry point. The runtime hot
+    path (worker, prompt ingress, retry) no longer auto-repairs projections.
+    """
+    if current_user is None:
+        # Without a user/workspace we cannot rebuild the agent to read
+        # checkpoint state safely. Skip silently rather than fail.
+        return
+    if session.status in {"running", "queued", "claimed"}:
+        # Active runs may still legitimately hold half-projected tool groups.
+        # Doctor should not touch live runtime; surface diagnostics instead.
+        report.actions.append(DoctorAction(
+            action="skip_projection_repair_active_run",
+            applied=False,
+            reason=f"session_status_{session.status}",
+        ))
+        return
+
+    try:
+        from agent.projection_consistency import (
+            inspect_session_projection_consistency,
+            mark_latest_failed_run_projection_recoverable,
+            repair_db_projection_ahead,
+        )
+
+        report_consistency, _checkpoint_messages = await inspect_session_projection_consistency(
+            db,
+            session,
+            current_user=current_user,
+        )
+    except Exception as exc:
+        report.actions.append(DoctorAction(
+            action="inspect_db_projection_ahead",
+            applied=False,
+            reason=f"inspect_failed:{type(exc).__name__}",
+        ))
+        return
+
+    if not report_consistency.is_db_projection_ahead:
+        # Nothing to repair; do not even add an entry to keep doctor reports terse.
+        if report_consistency.is_checkpoint_projection_ahead:
+            report.actions.append(DoctorAction(
+                action="diagnose_checkpoint_projection_ahead",
+                applied=False,
+                reason="checkpoint_projection_ahead",
+                details=report_consistency.to_dict(),
+            ))
+        return
+
+    details = {
+        "projection_consistency": report_consistency.to_dict(),
+    }
+
+    if dry_run:
+        report.actions.append(DoctorAction(
+            action="repair_db_projection_ahead",
+            applied=False,
+            reason="dry_run",
+            details=details,
+        ))
+        return
+
+    try:
+        repair_result = await repair_db_projection_ahead(db, report_consistency)
+    except Exception as exc:
+        report.actions.append(DoctorAction(
+            action="repair_db_projection_ahead",
+            applied=False,
+            reason=f"repair_failed:{type(exc).__name__}",
+            details=details,
+        ))
+        return
+
+    details["projection_repair"] = repair_result.to_dict()
+    if repair_result.repaired:
+        try:
+            await mark_latest_failed_run_projection_recoverable(
+                db,
+                session.id,
+                report_consistency,
+                repair_result,
+            )
+        except Exception:
+            # Marking recoverable is best-effort diagnostics; do not fail repair.
+            pass
+
+    report.actions.append(DoctorAction(
+        action="repair_db_projection_ahead",
+        applied=repair_result.repaired,
+        reason=repair_result.reason or "no_changes",
+        details=details,
+    ))
+    action = report.actions[-1]
+    if repair_result.repaired:
         await _record_doctor_action(db, session.id, action)
 
 

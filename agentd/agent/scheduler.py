@@ -96,6 +96,16 @@ async def enqueue_abort(
     return run
 
 
+async def enqueue_abort_once(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+) -> AgentRun | None:
+    """Enqueue at most one queued abort signal for a session."""
+    if await has_pending_abort(db, session_id):
+        return None
+    return await enqueue_abort(db, session_id)
+
+
 # ── Claim ────────────────────────────────────────────────────────────────
 
 
@@ -277,6 +287,38 @@ async def cancel_queued_runs(db: AsyncSession, session_id: uuid.UUID) -> int:
         .where(
             AgentRun.session_id == session_id,
             AgentRun.status == "queued",
+        )
+        .values(status="cancelled", updated_at=now)
+    )
+    await db.flush()
+    return result.rowcount
+
+
+async def cancel_queued_non_abort_runs(db: AsyncSession, session_id: uuid.UUID) -> int:
+    """Cancel queued work runs while preserving an existing abort signal."""
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        sql_update(AgentRun)
+        .where(
+            AgentRun.session_id == session_id,
+            AgentRun.status == "queued",
+            AgentRun.run_type != "abort",
+        )
+        .values(status="cancelled", updated_at=now)
+    )
+    await db.flush()
+    return result.rowcount
+
+
+async def cancel_queued_abort_runs(db: AsyncSession, session_id: uuid.UUID) -> int:
+    """Cancel queued abort cleanup runs after the active run handled interrupt."""
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        sql_update(AgentRun)
+        .where(
+            AgentRun.session_id == session_id,
+            AgentRun.status == "queued",
+            AgentRun.run_type == "abort",
         )
         .values(status="cancelled", updated_at=now)
     )

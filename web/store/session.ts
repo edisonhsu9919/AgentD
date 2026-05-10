@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { apiFetch } from "@/lib/api";
 import { stripThinkTags } from "@/lib/constants";
-import type { Session, SessionStatus } from "@/lib/types";
+import type { LoadedSkill, Session, SessionStatus } from "@/lib/types";
 
 interface SessionState {
   sessions: Session[];
@@ -16,6 +16,8 @@ interface SessionState {
   deleteSession: (id: string) => Promise<void>;
   updateSessionStatus: (id: string, status: SessionStatus) => void;
   updateSessionTitle: (id: string, title: string) => void;
+  updateSessionLoadedSkills: (id: string, loadedSkills: LoadedSkill[]) => void;
+  saveSessionTitle: (id: string, title: string) => Promise<Session>;
 }
 
 export const useSessionStore = create<SessionState>((set, get) => ({
@@ -127,5 +129,32 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         x.id === id ? { ...x, title: cleaned } : x,
       ),
     }));
+  },
+
+  updateSessionLoadedSkills: (id: string, loadedSkills: LoadedSkill[]) => {
+    set((s) => ({
+      sessions: s.sessions.map((x) =>
+        x.id === id ? { ...x, loaded_skills: loadedSkills } : x,
+      ),
+    }));
+  },
+
+  saveSessionTitle: async (id: string, title: string) => {
+    const cleaned = stripThinkTags(title).replace(/\s+/g, " ").trim();
+    if (!cleaned) {
+      throw new Error("标题不能为空");
+    }
+    if (cleaned.length > 80) {
+      throw new Error("标题不能超过 80 个字符");
+    }
+    const session = await apiFetch<Session>(`/sessions/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title: cleaned }),
+    });
+    const normalized = { ...session, title: stripThinkTags(session.title) };
+    set((s) => ({
+      sessions: s.sessions.map((x) => (x.id === id ? normalized : x)),
+    }));
+    return normalized;
   },
 }));

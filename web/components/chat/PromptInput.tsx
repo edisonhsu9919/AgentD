@@ -36,9 +36,11 @@ export default function PromptInput({
     useState<RuntimeModelConfigData | null>(null);
   const [vlmConfig, setVlmConfig] = useState<VLMConfigResponse | null>(null);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const status = useChatStore((s) => s.status);
   const sendPrompt = useChatStore((s) => s.sendPrompt);
+  const runCommand = useChatStore((s) => s.runCommand);
   const cancelTask = useChatStore((s) => s.cancelTask);
 
   // Consume pending insert from skill picker
@@ -46,7 +48,18 @@ export default function PromptInput({
   const clearPendingInsert = useChatStore((s) => s.clearPendingInsert);
   useEffect(() => {
     if (pendingInsert) {
-      setText((prev) => pendingInsert + prev);
+      setText((prev) => {
+        const target = textareaRef.current;
+        if (target && document.activeElement === target) {
+          const start = target.selectionStart ?? prev.length;
+          const end = target.selectionEnd ?? prev.length;
+          return `${prev.slice(0, start)}${pendingInsert}${prev.slice(end)}`;
+        }
+        return prev.trim() ? `${prev}\n${pendingInsert}` : pendingInsert;
+      });
+      window.setTimeout(() => {
+        textareaRef.current?.focus();
+      }, 0);
       clearPendingInsert();
     }
   }, [pendingInsert, clearPendingInsert]);
@@ -85,19 +98,28 @@ export default function PromptInput({
     if (!text.trim() || !canSend || !sessionId) return;
 
     const content = text.trim();
+    const isCommand = isSlashSkillLoadCommand(content);
     setText("");
     setError(null);
     setSending(true);
 
-    // Optimistic: update session store status so header badge shows "running"
-    updateSessionStatus(sessionId, "running");
+    // Optimistic: only model prompts enqueue a run and move session status.
+    if (!isCommand) {
+      updateSessionStatus(sessionId, "running");
+    }
 
     try {
-      await sendPrompt(sessionId, content);
+      if (isCommand) {
+        await runCommand(sessionId, content);
+      } else {
+        await sendPrompt(sessionId, content);
+      }
     } catch (err) {
       // Revert session status on error
-      updateSessionStatus(sessionId, "idle");
-      if (err instanceof ApiRequestError && err.status === 409) {
+      if (!isCommand) {
+        updateSessionStatus(sessionId, "idle");
+      }
+      if (err instanceof ApiRequestError) {
         setError(err.message);
       } else {
         setError("Failed to send message");
@@ -138,6 +160,7 @@ export default function PromptInput({
         <div className="flex items-end gap-3">
           <div className="flex min-w-0 flex-1 flex-col rounded-[28px] bg-bg-primary px-4 py-3">
             <textarea
+              ref={textareaRef}
               value={text}
               onChange={(e) => setText(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -210,6 +233,10 @@ export default function PromptInput({
       </div>
     </div>
   );
+}
+
+function isSlashSkillLoadCommand(value: string) {
+  return /^\/skill\s+load(?:\s+|$)/i.test(value.trim());
 }
 
 function RuntimeModelPill({

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ── Request ──────────────────────────────────────────────────────────────────
@@ -17,6 +17,26 @@ class SessionCreate(BaseModel):
 class PromptRequest(BaseModel):
     content: str
     attachments: Optional[list[dict[str, Any]]] = None
+
+
+class SessionCommandRequest(BaseModel):
+    command: str
+
+
+class SessionUpdate(BaseModel):
+    title: Optional[str] = None
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        normalized = " ".join(value.replace("\n", " ").replace("\r", " ").split())
+        if not normalized:
+            raise ValueError("title cannot be empty")
+        if len(normalized) > 80:
+            raise ValueError("title must be 80 characters or fewer")
+        return normalized
 
 
 # ── Response ─────────────────────────────────────────────────────────────────

@@ -16,7 +16,9 @@ import type {
   SessionPolicy,
   PolicyMode,
   PermissionRecord,
+  SessionCommandResponse,
 } from "@/lib/types";
+import { useSessionStore } from "@/store/session";
 
 interface ChatState {
   messages: Message[];
@@ -35,6 +37,7 @@ interface ChatState {
 
   fetchMessages: (sessionId: string) => Promise<void>;
   sendPrompt: (sessionId: string, content: string) => Promise<void>;
+  runCommand: (sessionId: string, command: string) => Promise<void>;
   cancelTask: (sessionId: string) => Promise<void>;
 
   // Runtime & Policy
@@ -153,6 +156,23 @@ export const useChatStore = create<ChatState>((set) => ({
     } catch {
       // non-fatal: SSE done will refetch anyway
     }
+  },
+
+  runCommand: async (sessionId: string, command: string) => {
+    const result = await apiFetch<SessionCommandResponse>(
+      `/sessions/${sessionId}/commands`,
+      {
+        method: "POST",
+        body: JSON.stringify({ command }),
+      },
+    );
+    set((s) => ({
+      messages: [...s.messages, result.message],
+      status: "idle",
+    }));
+    useSessionStore
+      .getState()
+      .updateSessionLoadedSkills(sessionId, result.loaded_skills);
   },
 
   cancelTask: async (sessionId: string) => {

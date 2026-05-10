@@ -134,6 +134,15 @@ async def test_checkpoint_human_message_legacy_hash_dedupes_api_user_prompt(monk
 
 @pytest.mark.asyncio
 async def test_projection_guard_blocks_user_insert_between_tool_call_and_result(monkeypatch):
+    """Legacy v0.4.4 strict gate behaviour, preserved behind the rollback flag.
+
+    v0.4.9 Phase C audit Finding 3: under the default (flag off) projection
+    contract, dirty DB tail is diagnostics-only and never blocks ingest. We
+    keep the strict assertion gated on the rollback flag for backwards compat.
+    """
+    from core.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "runtime_integrity_gate_db_tail_enabled", True)
     monkeypatch.setattr(
         "agent.message_persistence.session_svc.list_messages",
         AsyncMock(return_value=[
@@ -190,6 +199,10 @@ async def test_projection_guard_allows_matching_tool_result_after_open_tool_call
 
 @pytest.mark.asyncio
 async def test_projection_guard_blocks_unrelated_tool_result(monkeypatch):
+    """Legacy v0.4.4 strict gate, preserved behind the rollback flag (see above)."""
+    from core.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "runtime_integrity_gate_db_tail_enabled", True)
     monkeypatch.setattr(
         "agent.message_persistence.session_svc.list_messages",
         AsyncMock(return_value=[

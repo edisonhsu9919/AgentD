@@ -137,6 +137,17 @@ class Settings(BaseSettings):
             "matching tool_result messages instead of writing half-open DB projections."
         ),
     )
+    runtime_integrity_gate_db_tail_enabled: bool = Field(
+        default=False,
+        description=(
+            "v0.4.9 Phase A regression safeguard. When false (default), DB tail "
+            "anomalies are recorded as diagnostics only and do not push runs to "
+            "FAIL_INTEGRITY_ERROR or reject prompt ingress. Setting this to true "
+            "restores the v0.4.4 behavior where DB tail acts as a runtime truth "
+            "source. Intended as a temporary rollback switch; planned for removal "
+            "in v0.5.0."
+        ),
+    )
 
     # ── Seed admin ──────────────────────────────────────────────────────────
     # Only used on first startup when the users table is empty.

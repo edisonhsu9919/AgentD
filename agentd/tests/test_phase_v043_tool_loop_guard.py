@@ -1144,17 +1144,34 @@ class TestPermissionResumeIntegrity:
         assert event["permission_id"] == str(permission_id)
 
     @pytest.mark.asyncio
-    async def test_worker_refuses_completed_run_when_session_still_running(self):
+    async def test_worker_coerces_non_terminal_session_status_to_idle_fail_soft(self):
+        """v0.4.9 Phase A: previously raised RuntimeError on status='running' after run.
+
+        That hard-raise was classified as internal_invariant_violation → terminal,
+        which produced a secondary kill-shot once executor briefly drifted to a
+        non-terminal status. Phase A coerces the session to idle and continues.
+        """
+        from agent.runtime_integrity import RuntimeGateAction, RuntimeGateDecision
         from agent.worker import AgentWorker
+
+        class _FakeDb:
+            async def commit(self):
+                return None
 
         class SessionCtx:
             async def __aenter__(self):
-                return object()
+                return _FakeDb()
 
             async def __aexit__(self, exc_type, exc, tb):
                 return False
 
         worker = AgentWorker(worker_id="phase-v043")
+        worker._publish = AsyncMock()
+        worker._load_terminal_runtime_integrity_decision = AsyncMock(return_value=RuntimeGateDecision(
+            action=RuntimeGateAction.FINALIZE_IDLE,
+            reason="checkpoint_clean",
+            can_accept_user_prompt=True,
+        ))
 
         with (
             patch("agent.worker.AsyncSessionLocal", return_value=SessionCtx()),
@@ -1162,6 +1179,13 @@ class TestPermissionResumeIntegrity:
                 "agent.worker.session_svc.get_session",
                 new=AsyncMock(return_value=SimpleNamespace(status="running")),
             ),
-            pytest.raises(RuntimeError, match="non-terminal session status='running'"),
+            patch(
+                "agent.worker.session_svc.update_session_status",
+                new=AsyncMock(),
+            ) as update_status,
         ):
+            # Must NOT raise (previously raised RuntimeError).
             await worker._assert_run_returned_terminal_state(str(uuid.uuid4()))
+
+        # Should have been coerced to idle.
+        assert any(call.args[2] == "idle" for call in update_status.await_args_list)

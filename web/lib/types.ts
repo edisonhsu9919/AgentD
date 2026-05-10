@@ -72,7 +72,7 @@ export interface Session {
   parent_id: string | null;
   status: SessionStatus;
   token_usage: TokenUsage;
-  loaded_skills: string[];
+  loaded_skills: Array<LoadedSkill | string>;
   created_at: string;
   updated_at: string;
 }
@@ -82,6 +82,20 @@ export interface Session {
 export interface TextPart {
   type: "text";
   content: string;
+}
+
+export interface CommandPart {
+  type: "command";
+  command: string;
+}
+
+export interface CommandResultPart {
+  type: "command_result";
+  command: string;
+  status: "success" | "error";
+  text: string;
+  skill_name?: string;
+  skill_version?: string;
 }
 
 export interface ToolCallPart {
@@ -140,7 +154,7 @@ export interface SourceRefsPart {
   sources: SourceRefItem[];
 }
 
-export type Part = TextPart | ToolCallPart | ToolResultPart | CompactionPart | ErrorPart | ReasoningPart | SubtaskResultPart | SourceRefsPart;
+export type Part = TextPart | CommandPart | CommandResultPart | ToolCallPart | ToolResultPart | CompactionPart | ErrorPart | ReasoningPart | SubtaskResultPart | SourceRefsPart;
 
 export interface Message {
   id: string;
@@ -151,6 +165,18 @@ export interface Message {
   token_usage: TokenUsage | null;
   seq: number;
   created_at: string;
+}
+
+export interface LoadedSkill {
+  name: string;
+  version: string;
+}
+
+export interface SessionCommandResponse {
+  command: string;
+  status: "success";
+  message: Message;
+  loaded_skills: LoadedSkill[];
 }
 
 // --- SSE Events ---
@@ -859,8 +885,10 @@ export type ClauseImportJobStatus =
   | "uploaded"
   | "running"
   | "waiting_user"
+  | "artifact_invalid"
   | "not_importable"
   | "extraction_failed"
+  | "partial_artifacts_ready"
   | "extracted"
   | "reviewing"
   | "committing"

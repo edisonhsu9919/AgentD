@@ -85,6 +85,9 @@ AgentD-Design-Reference/
 /drafts_login_hero/
 agentd-login-logo-enter-fix.png
 
+# v0.4.9 headed test screenshots (local artifact only)
+/v049*.png
+
 # Local database files
 *.db
 

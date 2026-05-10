@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+@source "../components/extensions/Clause*.tsx";
+@source "./extensions/[name]/import/page.tsx";
+
 :root {
   --background: #ffffff;
   --foreground: #2a2933;

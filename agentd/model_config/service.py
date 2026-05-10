@@ -412,6 +412,7 @@ class ResolvedVLMConfig:
     base_url: str
     api_key: str
     model_id: str
+    provider_type: str = "openai_compatible"
     config_id: uuid.UUID | None = None
     timeout_seconds: int | None = None
     extra_params: dict | None = None
@@ -446,6 +447,7 @@ async def resolve_active_vlm_config(db: AsyncSession) -> ResolvedVLMConfig | Non
         return ResolvedVLMConfig(
             source="db_default",
             name=mc.name,
+            provider_type=mc.provider_type,
             base_url=mc.base_url,
             api_key=mc.api_key,
             model_id=mc.model_id,

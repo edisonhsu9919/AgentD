@@ -11,6 +11,7 @@ Does NOT own scheduling, claim, or task lifecycle — that's scheduler + worker.
 
 import asyncio
 import logging
+import time
 import traceback
 import uuid
 from types import SimpleNamespace
@@ -74,6 +75,8 @@ _SUBTASK_RESULT_BRIDGE_KIND = "subtask_result_bridge"
 _SUBTASK_CONTINUATION_PROMPT = (
     "Continue from the bridged subtask result already present in the conversation."
 )
+ABORT_CHECK_CHUNK_INTERVAL = 20
+ABORT_CHECK_SECONDS = 1.0
 
 
 class RecoverableProviderTimeout(RuntimeError):
@@ -499,14 +502,12 @@ async def _execute_graph(
             agent, config, session_id, session_dir, snapshot, publish, check_abort,
         ):
             return
-        await _update_db_status(session_id, "idle")
-        await publish(session_id, {"event": "status_change", "status": "idle"})
+        await _finalize_user_abort(session_id, publish)
         return
 
     # Check abort boundary
     if check_abort and await check_abort():
-        await _update_db_status(session_id, "idle")
-        await publish(session_id, {"event": "status_change", "status": "idle"})
+        await _finalize_user_abort(session_id, publish)
         return
 
     # Check for HITL interrupt
@@ -536,7 +537,7 @@ async def _stream_and_translate(
     v0.4.8: ordinary tool_call/tool_result groups are persisted atomically
     after the tools node completes. SSE still carries live tool_start/tool_result
     events; canonical DB transcript no longer stores half-open ordinary groups.
-    Phase L: Checks abort at node boundaries (after each model/tools node).
+    Phase L/v0.4.9: Checks abort at node boundaries and while model tokens stream.
 
     Returns True if aborted mid-stream, False otherwise.
     """
@@ -547,6 +548,8 @@ async def _stream_and_translate(
     current_tool_messages: list[ToolMessage] = []
     current_tool_call_message: AIMessage | None = None
     tool_group_accumulator = ToolGroupAccumulator()
+    abort_chunk_counter = 0
+    last_abort_check_at = time.monotonic()
 
     async def flush_tool_group(reason: str) -> None:
         nonlocal current_tool_messages
@@ -571,6 +574,7 @@ async def _stream_and_translate(
         input_data, config=config, stream_mode=["messages", "updates"],
     ):
         if mode == "messages":
+            abort_chunk_counter += 1
             chunk, _metadata = data
             # Token-level text delta from model node
             if isinstance(chunk, AIMessageChunk):
@@ -603,6 +607,16 @@ async def _stream_and_translate(
                         "message_id": current_message_id,
                         "content": cleaned,
                     })
+            if check_abort:
+                now = time.monotonic()
+                if (
+                    abort_chunk_counter >= ABORT_CHECK_CHUNK_INTERVAL
+                    or now - last_abort_check_at >= ABORT_CHECK_SECONDS
+                ):
+                    abort_chunk_counter = 0
+                    last_abort_check_at = now
+                    if await check_abort():
+                        return True
 
         elif mode == "updates":
             for node_name, node_data in data.items():
@@ -1568,6 +1582,27 @@ async def _finalize(agent, config: dict, session_id: str, publish: PublishFn) ->
         await _update_db_status(session_id, "waiting", token_usage=token_usage)
         await publish(session_id, {"event": "status_change", "status": "waiting"})
         return
+    if gate_decision.action == RuntimeGateAction.CONTINUE_MODEL:
+        # v0.4.9 Phase B Finding 1: CONTINUE_MODEL is a legal continuation
+        # state ("checkpoint says next=model after a closed tool_result").
+        # Treat it as a soft return: record diagnostics, persist token usage,
+        # and let the worker's _assert_run_returned_terminal_state re-evaluate
+        # the gate and enqueue a narrow continue run.
+        #
+        # We set session.status to "idle" so the worker's terminal helper does
+        # not interpret a stray "running" as an executor drift (fail-soft).
+        # The continue run enqueued by the worker will transition the session
+        # to "queued" immediately afterward — there is no user-visible idle
+        # window because both DB writes happen inside the same worker tick.
+        await _record_run_diagnostics(agent, session_id, messages, snapshot=snapshot)
+        await _update_db_status(session_id, "idle", token_usage=token_usage)
+        await publish(session_id, {
+            "event": "status_change",
+            "status": "idle",
+            "trigger": "executor_finalize_continue_model",
+            "reason": gate_decision.reason,
+        })
+        return
     if gate_decision.action != RuntimeGateAction.FINALIZE_IDLE:
         await _record_run_diagnostics(agent, session_id, messages, snapshot=snapshot)
         raise RuntimeIntegrityError(session_id, gate_decision)
@@ -1653,8 +1688,12 @@ async def _finalize(agent, config: dict, session_id: str, publish: PublishFn) ->
         "context": context,
     })
 
-    # Auto-generate title (best-effort, non-blocking)
-    asyncio.create_task(_maybe_generate_title(session_id, messages, publish))
+    # v0.4.9 follow-up: title maintenance must not be a fire-and-forget orphan.
+    # We still publish ``done`` first so the user sees the run finish promptly,
+    # then execute bounded title generation on this worker tick. The sidecar
+    # model call has its own timeout and mechanical fallback, so this remains
+    # best-effort without disappearing after worker teardown.
+    await _maybe_generate_title(session_id, messages, publish)
 
     # Phase P4-C: update rolling session memory (best-effort, non-blocking)
     _sd = getattr(agent, "_session_dir", None)
@@ -1973,73 +2012,40 @@ _strip_think_tags = _strip_model_tags
 
 
 async def _maybe_generate_title(session_id: str, messages: list, publish: PublishFn) -> None:
-    from pathlib import Path
-    from langchain_openai import ChatOpenAI
-    from langchain_core.messages import HumanMessage as LCHumanMessage, SystemMessage as LCSystemMessage
+    from agent.session_title import record_title_generation_diagnostics
 
     try:
-        async with AsyncSessionLocal() as db:
-            sid = uuid.UUID(session_id)
-            session = await session_svc.get_session(db, sid)
-            if not session or session.title != "New Session":
-                return
+        from agent.session_title import generate_session_title
 
-        title_prompt_path = Path(__file__).parent / "prompts" / "hidden" / "title.md"
-        if not title_prompt_path.exists():
-            return
-        title_system = title_prompt_path.read_text(encoding="utf-8").strip()
-
-        summary_parts: list[str] = []
-        for msg in messages[:6]:
-            if isinstance(msg, HumanMessage):
-                content = _strip_think_tags(msg.content[:200])
-                if content:
-                    summary_parts.append(f"User: {content}")
-            elif isinstance(msg, AIMessage) and msg.content:
-                content = _strip_think_tags(msg.content[:200])
-                if content:
-                    summary_parts.append(f"Assistant: {content}")
-        if not summary_parts:
-            return
-
-        conversation_text = "\n".join(summary_parts)
-
-        # Resolve LLM config from DB or env fallback (Phase I2)
-        from model_config.service import resolve_active_model_config
-        async with AsyncSessionLocal() as config_db:
-            resolved = await resolve_active_model_config(config_db)
-
-        llm = ChatOpenAI(
-            model=session.model_id,
-            base_url=resolved.base_url,
-            api_key=resolved.api_key,
-            streaming=False,
-            max_tokens=60,
-            http_async_client=httpx.AsyncClient(trust_env=False),
-        )
-        result = await llm.ainvoke([
-            LCSystemMessage(content=title_system),
-            LCHumanMessage(content=conversation_text),
-        ])
-
-        # Strip <think> from model output too (local models may include reasoning)
-        title = _strip_think_tags(result.content or "")
-        title = title.strip('"').strip("'")[:50]
-        if not title:
-            return
-
-        async with AsyncSessionLocal() as db:
-            from sqlalchemy import update as sql_update
-            from session.models import Session
-            await db.execute(
-                sql_update(Session).where(Session.id == sid).values(title=title)
+        result = await generate_session_title(session_id, messages)
+        if not result.title:
+            await record_title_generation_diagnostics(
+                session_id, dict(result.diagnostics or {}),
             )
-            await db.commit()
-
-        await publish(session_id, {"event": "title_update", "title": title})
+            return
+        event = {"event": "title_update", "title": result.title}
+        diagnostics = dict(result.diagnostics or {})
+        diagnostics["maintenance_title_event_publish_attempted"] = True
+        try:
+            await publish(session_id, event)
+            diagnostics["maintenance_title_event_publish_ok"] = bool(
+                event.get("_event_bridge_notify_ok", True)
+            )
+            if event.get("_event_bridge_notify_error"):
+                diagnostics["maintenance_title_event_publish_error"] = str(
+                    event["_event_bridge_notify_error"]
+                )
+        except Exception as exc:
+            diagnostics["maintenance_title_event_publish_ok"] = False
+            diagnostics["maintenance_title_event_publish_error"] = (
+                f"{type(exc).__name__}: {exc}"
+            )
+            await record_title_generation_diagnostics(session_id, diagnostics)
+            return
+        await record_title_generation_diagnostics(session_id, diagnostics)
 
         if settings.debug:
-            print(f"[executor] title generated: {title}")
+            print(f"[executor] title generated: {result.title}")
 
     except Exception:
         if settings.debug:
@@ -2059,6 +2065,29 @@ async def _is_subtask_waiting(session_id: str) -> bool:
             return session is not None and session.status == "subtask_waiting"
     except Exception:
         return False
+
+
+async def _finalize_user_abort(session_id: str, publish: PublishFn) -> None:
+    """Cleanly return a user-aborted session to idle."""
+    try:
+        from agent import scheduler
+
+        sid = uuid.UUID(session_id)
+        async with AsyncSessionLocal() as db:
+            await scheduler.clear_interrupt(db, sid)
+            await scheduler.cancel_queued_abort_runs(db, sid)
+            await perm_svc.cancel_pending_by_session(db, sid)
+            await session_svc.update_session_status(db, sid, "idle")
+            await db.commit()
+    except Exception:
+        if settings.debug:
+            traceback.print_exc()
+        await _update_db_status(session_id, "idle")
+    await publish(session_id, {
+        "event": "status_change",
+        "status": "idle",
+        "reason": "user_abort",
+    })
 
 
 async def _update_db_status(

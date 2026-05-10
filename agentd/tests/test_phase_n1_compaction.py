@@ -518,29 +518,20 @@ class TestGenerateSummary:
         mock_result.content = valid_md
 
         with patch("agent.compaction.AsyncSessionLocal") as mock_db_ctx, \
-             patch("agent.compaction.ChatOpenAI") as mock_llm_cls:
+             patch("agent.maintenance_model.invoke_maintenance_chat", new_callable=AsyncMock) as mock_invoke:
             mock_db = AsyncMock()
             mock_db_ctx.return_value.__aenter__ = AsyncMock(return_value=mock_db)
             mock_db_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            with patch("model_config.service.resolve_model_config_for_model_id", new_callable=AsyncMock) as mock_resolve:
-                mock_resolve.return_value = MagicMock(
-                    base_url="http://test",
-                    api_key="key",
-                    model_id="summary-model",
-                )
+            mock_invoke.return_value = (mock_result, MagicMock(model_id="summary-model"))
 
-                mock_llm = AsyncMock()
-                mock_llm.ainvoke.return_value = mock_result
-                mock_llm_cls.return_value = mock_llm
+            msgs = [_sys(), _human(idx=0), _ai(idx=0)]
+            result = await generate_summary(msgs, [1, 2], "test-model")
 
-                msgs = [_sys(), _human(idx=0), _ai(idx=0)]
-                result = await generate_summary(msgs, [1, 2], "test-model")
-
-                assert "# Current State" in result
-                assert "rename PDFs" in result
-                assert mock_llm.ainvoke.call_count == 1
-                assert mock_llm_cls.call_args.kwargs["model"] == "summary-model"
+            assert "# Current State" in result
+            assert "rename PDFs" in result
+            assert mock_invoke.call_count == 1
+            assert mock_invoke.call_args.kwargs["purpose"] == "compact"
 
     @pytest.mark.asyncio
     async def test_retry_on_invalid_first_attempt(self):
@@ -558,27 +549,21 @@ class TestGenerateSummary:
         good_result.content = valid_md
 
         with patch("agent.compaction.AsyncSessionLocal") as mock_db_ctx, \
-             patch("agent.compaction.ChatOpenAI") as mock_llm_cls:
+             patch("agent.maintenance_model.invoke_maintenance_chat", new_callable=AsyncMock) as mock_invoke:
             mock_db = AsyncMock()
             mock_db_ctx.return_value.__aenter__ = AsyncMock(return_value=mock_db)
             mock_db_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            with patch("model_config.service.resolve_model_config_for_model_id", new_callable=AsyncMock) as mock_resolve:
-                mock_resolve.return_value = MagicMock(
-                    base_url="http://test",
-                    api_key="key",
-                    model_id="summary-model",
-                )
+            mock_invoke.side_effect = [
+                (bad_result, MagicMock(model_id="summary-model")),
+                (good_result, MagicMock(model_id="summary-model")),
+            ]
 
-                mock_llm = AsyncMock()
-                mock_llm.ainvoke.side_effect = [bad_result, good_result]
-                mock_llm_cls.return_value = mock_llm
+            msgs = [_sys(), _human(idx=0), _ai(idx=0)]
+            result = await generate_summary(msgs, [1, 2], "test-model")
 
-                msgs = [_sys(), _human(idx=0), _ai(idx=0)]
-                result = await generate_summary(msgs, [1, 2], "test-model")
-
-                assert "# Current State" in result
-                assert mock_llm.ainvoke.call_count == 2
+            assert "# Current State" in result
+            assert mock_invoke.call_count == 2
 
     @pytest.mark.asyncio
     async def test_fallback_on_double_failure(self):
@@ -587,28 +572,19 @@ class TestGenerateSummary:
         bad_result.content = "I don't understand the format."
 
         with patch("agent.compaction.AsyncSessionLocal") as mock_db_ctx, \
-             patch("agent.compaction.ChatOpenAI") as mock_llm_cls:
+             patch("agent.maintenance_model.invoke_maintenance_chat", new_callable=AsyncMock) as mock_invoke:
             mock_db = AsyncMock()
             mock_db_ctx.return_value.__aenter__ = AsyncMock(return_value=mock_db)
             mock_db_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            with patch("model_config.service.resolve_model_config_for_model_id", new_callable=AsyncMock) as mock_resolve:
-                mock_resolve.return_value = MagicMock(
-                    base_url="http://test",
-                    api_key="key",
-                    model_id="summary-model",
-                )
+            mock_invoke.return_value = (bad_result, MagicMock(model_id="summary-model"))
 
-                mock_llm = AsyncMock()
-                mock_llm.ainvoke.return_value = bad_result
-                mock_llm_cls.return_value = mock_llm
+            msgs = [_sys(), _human(idx=0), _ai(idx=0)]
+            result = await generate_summary(msgs, [1, 2], "test-model")
 
-                msgs = [_sys(), _human(idx=0), _ai(idx=0)]
-                result = await generate_summary(msgs, [1, 2], "test-model")
-
-                # Fallback returns raw text
-                assert "I don't understand" in result
-                assert mock_llm.ainvoke.call_count == 2
+            # Fallback returns raw text
+            assert "I don't understand" in result
+            assert mock_invoke.call_count == 2
 
     @pytest.mark.asyncio
     async def test_empty_input_returns_default(self):

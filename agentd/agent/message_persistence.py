@@ -100,6 +100,9 @@ async def persist_messages(session_id: str, messages: list) -> None:
                    getattr(msg, "additional_kwargs", {}).get("agentd_internal") == SUBTASK_RESULT_BRIDGE_KIND:
                     continue
                 if isinstance(msg, HumanMessage) and \
+                   getattr(msg, "additional_kwargs", {}).get("agentd_internal") == "slash_skill_load_command":
+                    continue
+                if isinstance(msg, HumanMessage) and \
                    SUBTASK_CONTINUATION_MARKER in (msg.content or ""):
                     continue
                 persistable.append(msg)
@@ -366,6 +369,15 @@ async def projection_can_append(
     role: str,
     parts: list[dict[str, Any]],
 ) -> bool:
+    """Decide whether new parts can append onto the DB messages projection.
+
+    v0.4.9 Phase C audit Finding 1/3: when the DB tail is dirty but the
+    rollback flag is off (default), we must NOT silently drop assistant
+    finals. Under the new contract DB messages are projection/diagnostics
+    only, so dirty tail is recorded as a diagnostic but ingress is not
+    blocked. The legacy strict gate is preserved behind
+    ``runtime_integrity_gate_db_tail_enabled=true``.
+    """
     try:
         from unittest.mock import Mock
         if isinstance(db, Mock):
@@ -379,6 +391,24 @@ async def projection_can_append(
     tail = inspect_db_transcript_tail(existing_messages[-20:])
     if not tail.has_open_tool_call:
         return True
+
+    # Default v0.4.9 path: dirty DB tail is diagnostics-only. Allow the append
+    # so assistant finals continue to land. The dirty tail is left to the
+    # session doctor / release path to clean up explicitly.
+    if not settings.runtime_integrity_gate_db_tail_enabled:
+        try:
+            import logging as _logging
+
+            _logging.getLogger(__name__).info(
+                "projection_append_dirty_tail_allowed session=%s role=%s "
+                "open_tool_call_ids=%s",
+                session_id, role, tail.open_tool_call_ids,
+            )
+        except Exception:
+            pass
+        return True
+
+    # Legacy strict gate (rollback flag): keep v0.4.4 behavior.
     if role != "tool":
         return False
     tool_result_ids = [

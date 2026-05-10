@@ -187,6 +187,7 @@ async def generate_metadata_draft(file_path: str) -> dict[str, Any]:
             "title": llm_draft.get("title", stem)[:100],
             "description": llm_draft.get("description", f"Knowledge document: {stem}")[:DESCRIPTION_MAX_CHARS],
             "tags": llm_draft.get("tags", [])[:5],
+            "permission": "private",
             "kind": kind,
             "filename": filename,
             "file_size": file_size,
@@ -198,6 +199,7 @@ async def generate_metadata_draft(file_path: str) -> dict[str, Any]:
         "title": stem[:100],
         "description": f"Knowledge document: {stem}"[:DESCRIPTION_MAX_CHARS],
         "tags": [],
+        "permission": "private",
         "kind": kind,
         "filename": filename,
         "file_size": file_size,
@@ -367,6 +369,7 @@ async def run_import_task(
             build_frontmatter,
             ensure_knowledge_dirs,
             generate_doc_id,
+            validate_frontmatter,
             write_knowledge_doc,
         )
 
@@ -388,6 +391,9 @@ async def run_import_task(
             source_path=f"knowledge/raw/{filename}",
             file_size=os.path.getsize(raw_path) if os.path.isfile(raw_path) else 0,
         )
+        errors = validate_frontmatter(fm)
+        if errors:
+            raise ValueError("; ".join(errors))
 
         write_knowledge_doc(doc_id, fm, content)
 

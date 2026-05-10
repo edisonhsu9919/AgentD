@@ -17,7 +17,10 @@ def _db_message(seq: int, role: str, parts: list[dict]):
 
 
 @pytest.mark.asyncio
-async def test_prompt_ingress_rejects_open_tool_call_before_user_message():
+async def test_prompt_ingress_accepts_dirty_db_tail_when_checkpoint_absent_under_default_flag():
+    """v0.4.9 Phase A: with the rollback flag off (default), DB tail dirty alone
+    should not produce SESSION_HAS_OPEN_RUNTIME_STATE.
+    """
     from session.router import _enforce_prompt_runtime_integrity_gate
 
     session = SimpleNamespace(id=uuid.uuid4(), status="idle")
@@ -36,6 +39,49 @@ async def test_prompt_ingress_rejects_open_tool_call_before_user_message():
                     "input": {},
                 }]),
             ], scope="recent_fallback", end_seq=1)),
+        ),
+        patch("permission.service.get_pending_by_session", new=AsyncMock(return_value=[])),
+    ):
+        # Should NOT raise — checkpoint absent + DB dirty must accept ingress.
+        await _enforce_prompt_runtime_integrity_gate(AsyncMock(), session, current_user)
+
+
+@pytest.mark.asyncio
+async def test_prompt_ingress_legacy_rejects_open_tool_call_under_flag(monkeypatch):
+    """Legacy v0.4.4 behavior is preserved behind the rollback flag."""
+    from core.config import settings as _settings
+    from session.router import _enforce_prompt_runtime_integrity_gate
+
+    monkeypatch.setattr(_settings, "runtime_integrity_gate_db_tail_enabled", True)
+
+    session = SimpleNamespace(id=uuid.uuid4(), status="idle")
+    current_user = SimpleNamespace(workspace="/tmp/user")
+
+    with (
+        patch("session.router._normalize_prompt_ingress_session_state", new=AsyncMock(return_value="idle")),
+        patch("session.router._load_checkpoint_state", new=AsyncMock(return_value=None)),
+        patch(
+            "agent.runtime_integrity.load_terminal_validation_messages",
+            new=AsyncMock(return_value=ValidationMessageSlice(messages=[
+                _db_message(1, "assistant", [{
+                    "type": "tool_call",
+                    "tool_call_id": "call_edit",
+                    "tool_name": "file_edit",
+                    "input": {},
+                }]),
+            ], scope="recent_fallback", end_seq=1)),
+        ),
+        patch("session.router._load_checkpoint_messages_for_repair", create=True, new=AsyncMock(return_value=[])),
+        patch(
+            "agent.projection_consistency.load_checkpoint_messages",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch(
+            "agent.projection_consistency.inspect_db_checkpoint_projection",
+            new=AsyncMock(return_value=SimpleNamespace(
+                is_db_projection_ahead=False,
+                to_dict=lambda: {},
+            )),
         ),
         patch("permission.service.get_pending_by_session", new=AsyncMock(return_value=[])),
         pytest.raises(HTTPException) as excinfo,

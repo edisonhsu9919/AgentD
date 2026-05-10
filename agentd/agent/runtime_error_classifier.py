@@ -64,10 +64,18 @@ class RuntimeErrorClassifier:
         "hitl_resume_mismatch",
         "subtask_bridge_error",
         "compaction_error",
+        # v0.4.9 Phase A: projection mismatches no longer kill the session.
+        # The DB tail is now diagnostics-only; classification stays for visibility,
+        # but the failure path joins the recoverable family.
+        "checkpoint_projection_mismatch",
     }
     TERMINAL_CATEGORIES = {
-        "checkpoint_projection_mismatch",
         "internal_invariant_violation",
+        # v0.4.9 Phase A audit Finding 2: real LangGraph checkpoint corruption
+        # (state.checkpoint_valid=false / checkpoint_invalid:* reasons) must
+        # remain terminal so doctor / admin gets a clear signal. This is
+        # distinct from projection mismatches, which are recoverable.
+        "checkpoint_corruption",
     }
 
     @classmethod
@@ -78,14 +86,23 @@ class RuntimeErrorClassifier:
         run_type: str | None = None,
         context: dict[str, Any] | None = None,
     ) -> RecoveryEnvelope:
+        merged_context: dict[str, Any] = {
+            **(context or {}),
+            "exception_type": type(exc).__name__,
+            **_exception_hints(exc),
+        }
+        # v0.4.9 Phase A audit Finding 2: when the exception is a
+        # RuntimeIntegrityError, lift the structured decision.reason into
+        # context so classification can distinguish recoverable projection
+        # mismatches from real checkpoint corruption.
+        decision = getattr(exc, "decision", None)
+        decision_reason = getattr(decision, "reason", None)
+        if decision_reason:
+            merged_context.setdefault("integrity_gate_reason", str(decision_reason))
         return cls.classify_error_text(
             f"{type(exc).__name__}: {exc}",
             run_type=run_type,
-            context={
-                **(context or {}),
-                "exception_type": type(exc).__name__,
-                **_exception_hints(exc),
-            },
+            context=merged_context,
         )
 
     @classmethod
@@ -159,6 +176,32 @@ class RuntimeErrorClassifier:
             return mapped
         if run_type == "subtask_bridge":
             return "subtask_bridge_error"
+
+        # v0.4.9 Phase A audit Finding 2: prefer structured RuntimeIntegrityError
+        # reason over text matching. checkpoint_invalid:* / checkpoint corruption
+        # is terminal; projection mismatches and unrecognized states fall
+        # through to recoverable.
+        gate_reason = str(context.get("integrity_gate_reason") or "").lower()
+        if gate_reason:
+            if gate_reason.startswith("checkpoint_invalid:"):
+                return "checkpoint_corruption"
+            if gate_reason.startswith("db_tail_open_tool_call") or gate_reason in {
+                "db_tail_user_inserted_between_tool_group",
+            }:
+                return "provider_protocol_tool_adjacency"
+            if gate_reason in {
+                "checkpoint_has_active_next",
+                "missing_checkpoint_with_runtime_state",
+                "pending_permission_without_open_hitl_checkpoint",
+                "pending_permission_without_matching_open_hitl_checkpoint",
+                "hitl_open_tool_call_missing_pending_permission",
+            } or gate_reason.startswith("unsupported_checkpoint_state"):
+                return "checkpoint_projection_mismatch"
+
+        # Same priority for raw text matches: checkpoint_invalid before the
+        # generic runtimeintegrityerror catch-all.
+        if "checkpoint_invalid:" in text or "checkpoint_valid=false" in text:
+            return "checkpoint_corruption"
 
         if _contains_any(text, ["toollopcircuitbreaker", "toolloopcircuitbreaker", "tool loop breaker"]):
             return "tool_loop_breaker"
@@ -306,6 +349,10 @@ def _source_for_category(category: str) -> str:
 
 def _next_action_for_category(category: str, severity: str) -> str:
     if severity == "terminal":
+        # checkpoint_corruption is terminal but actionable by an administrator
+        # (storage/checkpointer repair), not just dead.
+        if category == "checkpoint_corruption":
+            return "admin_fix_config"
         return "terminal"
     if category in {"provider_transient", "provider_rate_limit", "provider_empty_stream"}:
         return "retry"
@@ -332,7 +379,8 @@ def _user_message(category: str) -> str:
         "hitl_resume_mismatch": "人工确认状态不一致，需要重新同步权限状态后继续。",
         "subtask_bridge_error": "子任务结果桥接失败，主会话仍可继续。",
         "compaction_error": "上下文压缩失败，当前会话仍可继续。",
-        "checkpoint_projection_mismatch": "运行时状态与数据库记录不一致，暂时不能安全继续。",
+        "checkpoint_projection_mismatch": "运行时记录与数据库展示存在差异，已记录诊断；当前会话仍可继续，可继续输入新指令。",
+        "checkpoint_corruption": "运行时检查发现 checkpoint 已损坏，需要管理员介入修复。",
         "internal_invariant_violation": "运行时内部不变量被破坏，暂时不能安全继续。",
     }
     return messages.get(category, "本次运行失败，但会话仍可继续。")

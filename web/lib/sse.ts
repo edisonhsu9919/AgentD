@@ -13,6 +13,7 @@ export type SSEHandlers = {
 };
 
 let abortController: AbortController | null = null;
+const SERVER_CLOSE_RETRY = "SSE_SERVER_CLOSE";
 
 export function connectSSE(sessionId: string, handlers: SSEHandlers) {
   // Disconnect previous connection
@@ -23,9 +24,6 @@ export function connectSSE(sessionId: string, handlers: SSEHandlers) {
 
   const token = getToken();
   if (!token) return;
-
-  // Track whether we just processed a 'done' event (normal server close)
-  let lastWasDone = false;
 
   fetchEventSource(`${SSE_API_URL}/sessions/${sessionId}/events`, {
     method: "GET",
@@ -40,7 +38,6 @@ export function connectSSE(sessionId: string, handlers: SSEHandlers) {
         response.ok &&
         response.headers.get("content-type")?.includes(EventStreamContentType)
       ) {
-        lastWasDone = false;
         return;
       }
       throw new Error(`SSE connection failed: ${response.status}`);
@@ -51,9 +48,6 @@ export function connectSSE(sessionId: string, handlers: SSEHandlers) {
 
       try {
         const parsed = JSON.parse(msg.data) as SSEEvent;
-        if (parsed.event === "done") {
-          lastWasDone = true;
-        }
         handlers.onEvent(parsed);
       } catch {
         // Ignore unparseable messages
@@ -65,9 +59,7 @@ export function connectSSE(sessionId: string, handlers: SSEHandlers) {
       if (ctrl.signal.aborted) {
         throw err;
       }
-      // Server closed after 'done' — silent reconnect (expected behavior)
-      if (lastWasDone) {
-        lastWasDone = false;
+      if (err instanceof Error && err.message === SERVER_CLOSE_RETRY) {
         return 1000;
       }
       // Actual error — notify user and retry
@@ -77,9 +69,12 @@ export function connectSSE(sessionId: string, handlers: SSEHandlers) {
 
     onclose: () => {
       handlers.onClose?.();
-      // Server closes connection after 'done' event.
-      // Throw to trigger onerror → auto-reconnect for next prompt.
-      throw new Error("SSE_SERVER_CLOSE");
+      if (ctrl.signal.aborted) {
+        return;
+      }
+      // Session SSE is expected to be long-lived. Any server-side close should
+      // trigger fetch-event-source's retry path without showing a user error.
+      throw new Error(SERVER_CLOSE_RETRY);
     },
 
     // Keep connection alive even when tab is hidden

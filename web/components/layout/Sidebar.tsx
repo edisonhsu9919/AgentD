@@ -24,6 +24,9 @@ export default function Sidebar() {
   const fetchProfile = useUserProfileStore((s) => s.fetchProfile);
 
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
+  const currentSession = useSessionStore((s) =>
+    s.sessions.find((session) => session.id === s.currentSessionId),
+  );
   const fileTree = useWorkspaceStore((s) => s.fileTree);
   const fetchTree = useWorkspaceStore((s) => s.fetchTree);
   const deleteFile = useWorkspaceStore((s) => s.deleteFile);
@@ -32,6 +35,11 @@ export default function Sidebar() {
   const clearPanel = usePanelStore((s) => s.clearPanel);
   const enabledSkills =
     profile?.installed_skills?.filter((skill) => skill.is_enabled) || [];
+  const loadedSkillNames = new Set(
+    (currentSession?.loaded_skills || [])
+      .map((skill) => typeof skill === "string" ? skill : skill.name)
+      .filter(Boolean),
+  );
 
   useEffect(() => {
     fetchProfile();
@@ -121,6 +129,7 @@ export default function Sidebar() {
             <div className="h-full overflow-y-auto">
               <SkillPicker
                 skills={enabledSkills}
+                loadedSkillNames={loadedSkillNames}
                 onInsert={insertToPrompt}
               />
             </div>

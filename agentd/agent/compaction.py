@@ -21,14 +21,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import httpx
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
     SystemMessage,
     ToolMessage,
 )
-from langchain_openai import ChatOpenAI
 
 from core.config import settings
 from core.database import AsyncSessionLocal
@@ -252,31 +250,27 @@ async def generate_summary(
             "# Worklog\n(empty)\n"
         )
 
-    from model_config.service import resolve_model_config_for_model_id
-
-    async with AsyncSessionLocal() as db:
-        resolved = await resolve_model_config_for_model_id(db, model_id)
-
-    llm = ChatOpenAI(
-        model=resolved.model_id,
-        base_url=resolved.base_url,
-        api_key=resolved.api_key,
-        streaming=False,
-        max_tokens=3000,
-        http_async_client=httpx.AsyncClient(trust_env=False),
-    )
-
     from langchain_core.messages import (
         HumanMessage as LCHumanMessage,
         SystemMessage as LCSystemMessage,
     )
+    from agent.maintenance_model import invoke_maintenance_chat
     from agent.executor import _strip_model_tags
 
     # Attempt 1
-    result = await llm.ainvoke([
-        LCSystemMessage(content=system_prompt),
-        LCHumanMessage(content=conversation_text),
-    ])
+    async with AsyncSessionLocal() as db:
+        result, _resolved = await invoke_maintenance_chat(
+            db,
+            purpose="compact",
+            messages=[
+                LCSystemMessage(content=system_prompt),
+                LCHumanMessage(content=conversation_text),
+            ],
+            max_tokens=3000,
+        )
+    if result is None:
+        logger.warning("Summary Markdown generation skipped: maintenance model unavailable")
+        return "(Summary generation failed)"
     raw = _strip_model_tags(result.content or "").strip()
 
     if _validate_memory_structure(raw):
@@ -290,11 +284,19 @@ async def generate_summary(
         + "\n".join(f"# {ch}" for ch in MEMORY_CHAPTERS)
         + "\n\nOutput only the Markdown document, no fences or extra text."
     )
-    result2 = await llm.ainvoke([
-        LCSystemMessage(content=system_prompt),
-        LCHumanMessage(content=conversation_text),
-        LCSystemMessage(content=retry_prompt),
-    ])
+    async with AsyncSessionLocal() as db:
+        result2, _resolved = await invoke_maintenance_chat(
+            db,
+            purpose="compact",
+            messages=[
+                LCSystemMessage(content=system_prompt),
+                LCHumanMessage(content=conversation_text),
+                LCSystemMessage(content=retry_prompt),
+            ],
+            max_tokens=3000,
+        )
+    if result2 is None:
+        return raw if raw else "(Summary generation failed)"
     raw2 = _strip_model_tags(result2.content or "").strip()
 
     if _validate_memory_structure(raw2):

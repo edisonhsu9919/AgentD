@@ -21,8 +21,10 @@ from session.schemas import (
     MessageResponse,
     PromptRequest,
     RuntimeResponse,
+    SessionCommandRequest,
     SessionCreate,
     SessionResponse,
+    SessionUpdate,
 )
 
 router = APIRouter()
@@ -97,6 +99,33 @@ async def get_session(
             detail={"code": "NOT_FOUND", "message": "Session not found"},
         )
     return ok(SessionResponse.model_validate(session).model_dump(mode="json"))
+
+
+@router.patch("/{session_id}")
+async def update_session(
+    session_id: uuid.UUID,
+    body: SessionUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    session = await session_svc.get_session(db, session_id)
+    if not session or session.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Session not found"},
+        )
+
+    if body.title is None:
+        return ok(SessionResponse.model_validate(session).model_dump(mode="json"))
+
+    updated = await session_svc.update_session_title(db, session_id, body.title)
+    if updated is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "INVALID_TITLE", "message": "Session title cannot be empty"},
+        )
+    await db.commit()
+    return ok(SessionResponse.model_validate(updated).model_dump(mode="json"))
 
 
 @router.delete("/{session_id}")
@@ -478,7 +507,21 @@ async def _recover_open_hitl_before_prompt(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "code": "PERMISSION_WAITING",
-                "message": "Session is waiting for permission approval",
+                "message": "Session is paused for tool approval. Approve or release before sending a new message.",
+                "available_actions": [
+                    {
+                        "action": "approve_or_deny_pending_permission",
+                        "endpoint": "/api/sessions/{session_id}/permissions",
+                        "method": "GET",
+                        "description": "List and resolve pending HITL approvals.",
+                    },
+                    {
+                        "action": "release",
+                        "endpoint": "/api/sessions/{session_id}/release",
+                        "method": "POST",
+                        "description": "Abandon the pending tool approval and continue with a new prompt.",
+                    },
+                ],
             },
         )
 
@@ -489,10 +532,24 @@ async def _recover_open_hitl_before_prompt(
                 "code": "CHECKPOINT_INTERRUPTED",
                 "message": (
                     "Session checkpoint is waiting at a tool approval boundary "
-                    "and cannot accept a new user message yet"
+                    "that cannot be auto-resumed. Release the session to start fresh."
                 ),
                 "reason": recovery.reason,
                 "policy_reason": decision.reason,
+                "available_actions": [
+                    {
+                        "action": "release",
+                        "endpoint": "/api/sessions/{session_id}/release",
+                        "method": "POST",
+                        "description": "Abandon the interrupted checkpoint and reset to idle.",
+                    },
+                    {
+                        "action": "doctor",
+                        "endpoint": "/api/sessions/{session_id}/doctor",
+                        "method": "POST",
+                        "description": "Run conservative repairs and inspect runtime diagnostics.",
+                    },
+                ],
             },
         )
 
@@ -521,41 +578,48 @@ async def _enforce_prompt_runtime_integrity_gate(
         RuntimeIntegrityInput,
         load_terminal_validation_messages,
     )
+    from core.config import settings as _settings
     from permission import service as perm_svc
 
     session_status = await _normalize_prompt_ingress_session_state(db, session)
     checkpoint_state = await _load_checkpoint_state(session, current_user)
-    try:
-        from agent.projection_consistency import (
-            inspect_db_checkpoint_projection,
-            load_checkpoint_messages,
-            mark_latest_failed_run_projection_recoverable,
-            repair_db_projection_ahead,
-        )
+    # v0.4.9 Phase A: when DB tail is diagnostics-only (default), prompt ingress
+    # no longer needs the runtime-path projection repair. The repair was a
+    # workaround for the v0.4.4 gate; with checkpoint as truth, dirty DB tail
+    # cannot block ingress. We still run a best-effort inspection to record
+    # diagnostics, but do not let it raise or commit repairs in the hot path.
+    if _settings.runtime_integrity_gate_db_tail_enabled:
+        try:
+            from agent.projection_consistency import (
+                inspect_db_checkpoint_projection,
+                load_checkpoint_messages,
+                mark_latest_failed_run_projection_recoverable,
+                repair_db_projection_ahead,
+            )
 
-        checkpoint_messages = await load_checkpoint_messages(
-            session,
-            current_user=current_user,
-        )
-        projection = await inspect_db_checkpoint_projection(
-            db,
-            session.id,
-            checkpoint_messages,
-        )
-        if projection.is_db_projection_ahead:
-            repair = await repair_db_projection_ahead(db, projection)
-            if repair.repaired:
-                await mark_latest_failed_run_projection_recoverable(
-                    db,
-                    session.id,
-                    projection,
-                    repair,
-                )
-                await db.commit()
-            else:
-                await db.flush()
-    except Exception:
-        logger.exception("Failed to run prompt ingress projection repair")
+            checkpoint_messages = await load_checkpoint_messages(
+                session,
+                current_user=current_user,
+            )
+            projection = await inspect_db_checkpoint_projection(
+                db,
+                session.id,
+                checkpoint_messages,
+            )
+            if projection.is_db_projection_ahead:
+                repair = await repair_db_projection_ahead(db, projection)
+                if repair.repaired:
+                    await mark_latest_failed_run_projection_recoverable(
+                        db,
+                        session.id,
+                        projection,
+                        repair,
+                    )
+                    await db.commit()
+                else:
+                    await db.flush()
+        except Exception:
+            logger.exception("Failed to run prompt ingress projection repair")
     validation = await load_terminal_validation_messages(
         db,
         session.id,
@@ -576,20 +640,111 @@ async def _enforce_prompt_runtime_integrity_gate(
     if decision.can_accept_user_prompt:
         return
 
+    # v0.4.9 Phase C: surface a No-Dead-Session contract — every prompt ingress
+    # rejection must hand the user actionable next steps. The 409 is no longer
+    # a terminal "session is dead" verdict; it is a "do one of these things"
+    # branch.
+    available_actions, message = _resolve_open_runtime_actions(decision)
     raise HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail={
             "code": "SESSION_HAS_OPEN_RUNTIME_STATE",
-            "message": (
-                "Session has an unresolved tool call or runtime continuation; "
-                "resolve or retry before sending a new message."
-            ),
+            "message": message,
             "runtime_state": decision.checkpoint_state_kind,
             "reason": decision.reason,
             "open_tool_call_ids": decision.open_tool_call_ids,
             "requires_human_input": decision.requires_human_input,
             "can_accept_user_prompt": False,
+            "available_actions": available_actions,
         },
+    )
+
+
+def _resolve_open_runtime_actions(decision) -> tuple[list[dict], str]:
+    """Phase C: map a runtime gate decision into actionable next steps for the user.
+
+    Returns ``(available_actions, message)`` where ``available_actions`` is a
+    list of ``{"action", "endpoint", "method", "description"}`` entries and
+    ``message`` is the user-facing summary.
+    """
+    state_kind = (decision.checkpoint_state_kind or "").lower()
+    requires_human = bool(getattr(decision, "requires_human_input", False))
+
+    if requires_human or state_kind == "hitl_open_tool_call":
+        return (
+            [
+                {
+                    "action": "approve_or_deny_pending_permission",
+                    "endpoint": "/api/sessions/{session_id}/permissions",
+                    "method": "GET",
+                    "description": "List and resolve pending HITL approvals.",
+                },
+                {
+                    "action": "release",
+                    "endpoint": "/api/sessions/{session_id}/release",
+                    "method": "POST",
+                    "description": "Abandon the pending tool approval and continue with a new prompt.",
+                },
+            ],
+            "Session is paused for tool approval. Approve or release before sending a new message.",
+        )
+
+    if state_kind == "next_model_after_tool_result":
+        return (
+            [
+                {
+                    "action": "retry",
+                    "endpoint": "/api/sessions/{session_id}/retry",
+                    "method": "POST",
+                    "description": "Resume the model continuation that was interrupted.",
+                },
+                {
+                    "action": "release",
+                    "endpoint": "/api/sessions/{session_id}/release",
+                    "method": "POST",
+                    "description": "Abandon the pending model continuation and start a fresh prompt.",
+                },
+            ],
+            "Session has an interrupted model continuation. Retry to resume or release to start fresh.",
+        )
+
+    # Subtask waiting / other transient states.
+    if state_kind in {"subtask_waiting"}:
+        return (
+            [
+                {
+                    "action": "wait_for_subtask",
+                    "endpoint": "/api/sessions/{session_id}/runtime",
+                    "method": "GET",
+                    "description": "Poll runtime status until the subtask resolves.",
+                },
+                {
+                    "action": "release",
+                    "endpoint": "/api/sessions/{session_id}/release",
+                    "method": "POST",
+                    "description": "Abandon the subtask and reset the session to idle.",
+                },
+            ],
+            "Session is waiting for a subtask. Wait for it to finish or release to reset.",
+        )
+
+    # Unknown / corrupted checkpoint — release is the safest exit.
+    return (
+        [
+            {
+                "action": "doctor",
+                "endpoint": "/api/sessions/{session_id}/doctor",
+                "method": "POST",
+                "description": "Run conservative repairs and inspect runtime diagnostics.",
+            },
+            {
+                "action": "release",
+                "endpoint": "/api/sessions/{session_id}/release",
+                "method": "POST",
+                "description": "Abandon any open runtime state and reset to idle.",
+            },
+        ],
+        "Session has unresolved runtime state. Run doctor to diagnose or release to reset.",
     )
 
 
@@ -765,6 +920,7 @@ async def get_runtime(
             ctx_ratio = diag.get("context_usage_ratio")
             gate = diag.get("runtime_integrity_gate")
             projection_repaired = _diagnostics_projection_repaired(diag)
+            session_released_recently = bool(diag.get("session_release_log"))
             if projection_repaired:
                 runtime_state = gate.get("checkpoint_state_kind") if isinstance(gate, dict) else runtime_state
                 can_accept_user_prompt = session.status not in {
@@ -780,6 +936,32 @@ async def get_runtime(
                 can_accept_user_prompt = bool(gate.get("can_accept_user_prompt", can_accept_user_prompt))
                 open_tool_call_ids = list(gate.get("open_tool_call_ids") or [])
                 requires_human_input = bool(gate.get("requires_human_input", False))
+                # v0.4.9 Phase C audit Finding 2: when the gate explicitly
+                # marks the DB-tail open ids as diagnostics-only, do not
+                # surface them as active runtime state. Keep them in admin
+                # diagnostics but stop misleading the prompt-ingress UI.
+                gate_reason = str(gate.get("reason") or "")
+                if (
+                    gate_reason.endswith("db_tail_diagnostics_only")
+                    or gate_reason == "no_checkpoint_db_tail_diagnostics_only"
+                    or gate_reason == "checkpoint_clean_db_tail_diagnostics_only"
+                ):
+                    open_tool_call_ids = []
+                    requires_human_input = False
+                # v0.4.9 Phase C followup: session.status is the live signal.
+                # When status=idle, any stale gate diagnostics from a prior
+                # waiting/error run (HITL hold, open continuation, etc.)
+                # must not bleed through to the user-facing runtime snapshot.
+                # Specifically: if the session was just released or
+                # doctored back to idle, the latest run's diagnostics still
+                # describe the pre-release world; we surface session.status
+                # truth instead.
+                if session.status == "idle":
+                    open_tool_call_ids = []
+                    requires_human_input = False
+                    can_accept_user_prompt = True
+                    if session_released_recently:
+                        runtime_state = "provider_ready"
 
         err_stmt = (
             sa_select(AgentRun)
@@ -1195,6 +1377,53 @@ async def send_prompt(
     return ok({"message_id": str(msg.id), "run_id": str(run.id), "status": "queued"})
 
 
+@router.post("/{session_id}/commands")
+async def run_session_command(
+    session_id: uuid.UUID,
+    body: SessionCommandRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Run a host-handled slash command without enqueueing an agent run."""
+    from agent.session_commands import SessionCommandError, execute_session_command
+
+    session = await session_svc.get_session(db, session_id)
+    if not session or session.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Session not found"},
+        )
+    if session.status in ("running", "waiting", "queued", "subtask_waiting"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "SESSION_BUSY",
+                "message": "Session is busy. Finish the current run before running a command.",
+            },
+        )
+
+    try:
+        result = await execute_session_command(
+            db,
+            session=session,
+            current_user=current_user,
+            command=body.command,
+        )
+    except SessionCommandError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+    await db.commit()
+    return ok({
+        "command": result.command,
+        "status": result.status,
+        "message": MessageResponse.model_validate(result.message).model_dump(mode="json"),
+        "loaded_skills": result.loaded_skills,
+    })
+
+
 @router.post("/{session_id}/retry")
 async def retry_session_model_continuation(
     session_id: uuid.UUID,
@@ -1214,18 +1443,26 @@ async def retry_session_model_continuation(
             detail={"code": "NOT_FOUND", "message": "Session not found"},
         )
 
-    try:
-        from agent.projection_consistency import repair_session_projection_ahead
+    # v0.4.9 Phase B: retry no longer runs silent projection repair on the
+    # hot path. With DB tail demoted to diagnostics-only, dirty projections do
+    # not block continuation. Operators can run /sessions/{id}/doctor explicitly
+    # if they need to clean up historical dirty rows. The legacy fast-path
+    # repair remains available behind the rollback flag for backwards compat.
+    from core.config import settings as _settings
 
-        _projection, repair = await repair_session_projection_ahead(
-            db,
-            session,
-            current_user=current_user,
-        )
-        if repair and repair.repaired:
-            await db.flush()
-    except Exception:
-        logger.exception("Failed to run retry projection repair")
+    if _settings.runtime_integrity_gate_db_tail_enabled:
+        try:
+            from agent.projection_consistency import repair_session_projection_ahead
+
+            _projection, repair = await repair_session_projection_ahead(
+                db,
+                session,
+                current_user=current_user,
+            )
+            if repair and repair.repaired:
+                await db.flush()
+        except Exception:
+            logger.exception("Failed to run retry projection repair")
 
     if session.status in ("running", "waiting", "queued", "subtask_waiting"):
         raise HTTPException(
@@ -1271,9 +1508,23 @@ async def retry_session_model_continuation(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "code": "PERMISSION_WAITING",
-                "message": "Session is waiting for permission approval",
+                "message": "Session is paused for tool approval. Approve or release before sending a new message.",
                 "retry_kind": hitl_decision.retry_kind,
                 "checkpoint_state_kind": hitl_decision.checkpoint_state_kind,
+                "available_actions": [
+                    {
+                        "action": "approve_or_deny_pending_permission",
+                        "endpoint": "/api/sessions/{session_id}/permissions",
+                        "method": "GET",
+                        "description": "List and resolve pending HITL approvals.",
+                    },
+                    {
+                        "action": "release",
+                        "endpoint": "/api/sessions/{session_id}/release",
+                        "method": "POST",
+                        "description": "Abandon the pending tool approval and continue with a new prompt.",
+                    },
+                ],
             },
         )
     if (
@@ -1301,10 +1552,24 @@ async def retry_session_model_continuation(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "code": "NOT_RETRYABLE",
-                "message": "No active failed run is retryable as a model continuation",
+                "message": "No active failed run is retryable as a model continuation. Send a new prompt or release the session.",
                 "reason": decision.reason,
                 "provider_error_category": decision.provider_error_category,
                 "checkpoint_state_kind": decision.checkpoint_state_kind,
+                "available_actions": [
+                    {
+                        "action": "send_new_prompt",
+                        "endpoint": "/api/sessions/{session_id}/prompt",
+                        "method": "POST",
+                        "description": "Send a new user message to continue the conversation.",
+                    },
+                    {
+                        "action": "release",
+                        "endpoint": "/api/sessions/{session_id}/release",
+                        "method": "POST",
+                        "description": "Reset any open runtime state back to idle.",
+                    },
+                ],
             },
         )
 
@@ -1346,6 +1611,7 @@ async def doctor_session_runtime(
         session=session,
         dry_run=dry_run,
         publish=event_bus.publish,
+        current_user=current_user,
     )
     await db.commit()
     if report.repaired:
@@ -1354,6 +1620,73 @@ async def doctor_session_runtime(
             "actions": [action.to_dict() for action in report.actions if action.applied],
         })
     return ok(report.to_dict())
+
+
+@router.post("/{session_id}/release")
+async def release_session_runtime(
+    session_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """v0.4.9 Phase C: explicit abandon path for open runtime continuations.
+
+    Cancels pending HITL approvals, marks active child session_tasks as
+    cancelled, injects synthetic closures into the LangGraph checkpoint, and
+    sets the session to ``idle`` so the next user prompt can be accepted.
+
+    The endpoint is conservative — it never invokes the model or retries
+    provider calls. It is the user-facing counterpart to ``/retry``.
+    """
+    from agent.session_release import release_session_to_idle
+    from core.events import event_bus
+
+    session = await session_svc.get_session(db, session_id)
+    if not session or session.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Session not found"},
+        )
+
+    if session.status in ("running", "queued"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "SESSION_BUSY",
+                "message": (
+                    f"Session is currently {session.status}; cancel the active run "
+                    "before releasing."
+                ),
+                "available_actions": [
+                    {
+                        "action": "cancel_task",
+                        "endpoint": "/api/sessions/{session_id}/cancel-task",
+                        "method": "DELETE",
+                        "description": "Abort the active run before releasing.",
+                    },
+                ],
+            },
+        )
+
+    result = await release_session_to_idle(
+        db, session=session, current_user=current_user,
+    )
+    await db.commit()
+
+    await event_bus.publish(str(session_id), {
+        "event": "session_released",
+        "released": result.released,
+        "cancelled_permission_count": result.cancelled_permission_count,
+        "cancelled_task_count": result.cancelled_task_count,
+        "closed_tool_call_ids": list(result.closed_tool_call_ids),
+        "new_state_kind": result.new_state_kind,
+    })
+    if result.released:
+        await event_bus.publish(str(session_id), {
+            "event": "status_change",
+            "status": "idle",
+            "trigger": "session_released",
+        })
+    return ok(result.to_dict())
 
 
 @router.get("/{session_id}/events")
@@ -1383,28 +1716,43 @@ async def sse_events(
 
     queue = await event_bus.subscribe(str(session_id))
 
-    async def _event_generator():
-        try:
-            while True:
-                # Check if client disconnected
-                if await request.is_disconnected():
-                    break
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
-                    yield {
-                        "event": event.get("event", "message"),
-                        "data": json.dumps(event, default=str),
-                    }
-                    # Stop streaming after "done" or terminal "error"
-                    if event.get("event") in ("done",):
-                        break
-                except asyncio.TimeoutError:
-                    # Send keepalive comment
-                    yield {"comment": "keepalive"}
-        finally:
-            event_bus.remove(str(session_id))
+    return EventSourceResponse(
+        _session_event_generator(
+            session_id=str(session_id),
+            request=request,
+            queue=queue,
+            event_bus=event_bus,
+        )
+    )
 
-    return EventSourceResponse(_event_generator())
+
+async def _session_event_generator(
+    *,
+    session_id: str,
+    request: Request,
+    queue,
+    event_bus,
+):
+    """Yield session-level SSE events until the client disconnects.
+
+    ``done`` is a run terminal event, not a session stream terminal event.
+    Keeping the stream open allows post-run maintenance events such as
+    ``title_update`` to arrive without forcing a reconnect race.
+    """
+    try:
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                yield {
+                    "event": event.get("event", "message"),
+                    "data": json.dumps(event, default=str),
+                }
+            except asyncio.TimeoutError:
+                yield {"comment": "keepalive"}
+    finally:
+        event_bus.remove(session_id, queue)
 
 
 @router.delete("/{session_id}/abort")
@@ -1418,7 +1766,12 @@ async def abort_session(
     Phase C: Enqueues an abort run + cancels any queued (unclaimed) runs.
     The owning worker detects the abort at its next boundary check.
     """
-    from agent.scheduler import cancel_queued_runs, enqueue_abort, request_interrupt
+    from agent.scheduler import (
+        cancel_queued_non_abort_runs,
+        cancel_queued_runs,
+        enqueue_abort_once,
+        request_interrupt,
+    )
 
     session = await session_svc.get_session(db, session_id)
     if not session or session.user_id != current_user.id:
@@ -1430,26 +1783,25 @@ async def abort_session(
     if session.status not in ("running", "waiting", "queued"):
         return ok({"aborted": False, "reason": "Session is not active"})
 
-    # Cancel any queued runs that haven't been claimed yet
-    cancelled_count = await cancel_queued_runs(db, session_id)
-
     # If session was merely queued (no worker claimed yet), just reset to idle
-    if session.status == "queued" and cancelled_count > 0:
+    if session.status == "queued":
+        cancelled_count = await cancel_queued_runs(db, session_id)
         # Also cancel any pending permissions (#42)
         from permission import service as perm_svc
         await perm_svc.cancel_pending_by_session(db, session_id)
         await session_svc.update_session_status(db, session_id, "idle")
         await db.commit()
-        return ok({"aborted": True})
+        return ok({"aborted": cancelled_count > 0})
 
-    # For running/waiting sessions, enqueue an abort signal for the worker
-    # Phase 7A: also set session-level interrupt flag so the running worker
-    # sees the abort at its next tool boundary (cross-worker safe)
+    # Running/waiting sessions cannot be preempted by a queued abort run: the
+    # active worker must observe the interrupt flag from inside the stream.
+    # The abort run is only a fallback cleanup signal, so keep it idempotent.
+    await cancel_queued_non_abort_runs(db, session_id)
     await request_interrupt(db, session_id)
-    await enqueue_abort(db, session_id)
+    abort_run = await enqueue_abort_once(db, session_id)
     await db.commit()
 
-    return ok({"aborted": True})
+    return ok({"aborted": True, "already_requested": abort_run is None})
 
 
 # ── Unified task cancellation (Phase L) ──────────────────────────────────────
@@ -1472,7 +1824,12 @@ async def cancel_task(
     - running: enqueue abort for the worker
     - idle/error: no-op for abort, still clears plan
     """
-    from agent.scheduler import cancel_queued_runs, enqueue_abort, request_interrupt
+    from agent.scheduler import (
+        cancel_queued_non_abort_runs,
+        cancel_queued_runs,
+        enqueue_abort_once,
+        request_interrupt,
+    )
     from core.events import event_bus
     from workspace.manager import get_session_dir
 
@@ -1487,9 +1844,8 @@ async def cancel_task(
 
     # 1. Stop current run (if active)
     if session.status in ("running", "waiting", "queued"):
-        await cancel_queued_runs(db, session_id)
-
         if session.status in ("queued", "waiting"):
+            await cancel_queued_runs(db, session_id)
             # No active worker — cancel permissions + reset directly
             from permission import service as perm_svc
             await perm_svc.cancel_pending_by_session(db, session_id)
@@ -1500,9 +1856,12 @@ async def cancel_task(
                 "event": "status_change", "status": "idle",
             })
         else:
-            # Running: set interrupt flag + enqueue abort for the worker
+            # Running: set interrupt flag for the active stream poller. The
+            # abort run is fallback cleanup and must be idempotent on repeats.
+            await cancel_queued_non_abort_runs(db, session_id)
             await request_interrupt(db, session_id)
-            await enqueue_abort(db, session_id)
+            abort_run = await enqueue_abort_once(db, session_id)
+            result["already_requested"] = abort_run is None
 
         result["aborted"] = True
 

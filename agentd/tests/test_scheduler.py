@@ -109,6 +109,31 @@ class TestSchedulerEnqueue:
         assert run.run_type == "abort"
         assert run.payload == {}
 
+    @pytest.mark.asyncio
+    async def test_enqueue_abort_once_reuses_existing_pending_abort(self, mock_db, monkeypatch):
+        from agent import scheduler
+
+        sid = uuid.uuid4()
+        monkeypatch.setattr(scheduler, "has_pending_abort", AsyncMock(return_value=True))
+
+        run = await scheduler.enqueue_abort_once(mock_db, sid)
+
+        assert run is None
+        mock_db.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_enqueue_abort_once_enqueues_when_absent(self, mock_db, monkeypatch):
+        from agent import scheduler
+
+        sid = uuid.uuid4()
+        monkeypatch.setattr(scheduler, "has_pending_abort", AsyncMock(return_value=False))
+
+        run = await scheduler.enqueue_abort_once(mock_db, sid)
+
+        assert run is not None
+        assert run.run_type == "abort"
+        mock_db.add.assert_called_once()
+
 
 # ── Unit tests: Scheduler status transitions ──────────────────────────────
 

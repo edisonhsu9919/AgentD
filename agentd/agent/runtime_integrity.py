@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import select
 
 from agent.checkpoint_state import CheckpointState, CheckpointStateKind
+from core.config import settings
 
 
 class RuntimeGateAction(str, Enum):
@@ -128,7 +129,11 @@ class RuntimeIntegrityGate:
 
     @classmethod
     def decide_terminal(cls, payload: RuntimeIntegrityInput) -> RuntimeGateDecision:
+        # v0.4.9 Phase A: DB tail is diagnostics-only by default. Terminal decisions
+        # are driven by checkpoint / runtime state truth. The flag exists as a
+        # short-term rollback switch and is planned for removal in v0.5.0.
         tail = inspect_db_transcript_tail(payload.db_tail_messages)
+        db_tail_can_fail = settings.runtime_integrity_gate_db_tail_enabled
         state = payload.checkpoint_state
         pending_count = len(payload.pending_permissions or [])
         state_kind = state.state_kind if state else None
@@ -180,7 +185,7 @@ class RuntimeIntegrityGate:
                 "session_subtask_waiting",
             )
 
-        if tail.invalid_user_inserted_between_tool_group:
+        if tail.invalid_user_inserted_between_tool_group and db_tail_can_fail:
             return decision(
                 RuntimeGateAction.FAIL_INTEGRITY_ERROR,
                 "db_tail_user_inserted_between_tool_group",
@@ -210,7 +215,7 @@ class RuntimeIntegrityGate:
                 f"checkpoint_invalid:{state.state_kind.value}",
             )
 
-        if tail.has_open_tool_call:
+        if tail.has_open_tool_call and db_tail_can_fail:
             if state_kind == CheckpointStateKind.HITL_OPEN_TOOL_CALL:
                 hitl_open_ids = _unique([
                     *tail.open_tool_call_ids,
@@ -274,10 +279,10 @@ class RuntimeIntegrityGate:
                 )
 
         if state is None:
-            if tail.clean and pending_count == 0:
+            if pending_count == 0:
                 return decision(
                     RuntimeGateAction.FINALIZE_IDLE,
-                    "no_checkpoint_clean_db_tail",
+                    "no_checkpoint_clean_db_tail" if tail.clean else "no_checkpoint_db_tail_diagnostics_only",
                     can_accept_user_prompt=True,
                 )
             return decision(
@@ -288,7 +293,7 @@ class RuntimeIntegrityGate:
         if state_kind in {CheckpointStateKind.EMPTY, CheckpointStateKind.PROVIDER_READY}:
             return decision(
                 RuntimeGateAction.FINALIZE_IDLE,
-                "checkpoint_and_db_tail_clean",
+                "checkpoint_clean" if tail.clean else "checkpoint_clean_db_tail_diagnostics_only",
                 can_accept_user_prompt=True,
             )
 

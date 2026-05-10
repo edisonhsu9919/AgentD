@@ -18,7 +18,8 @@ import CompactBanner from "@/components/chat/CompactBanner";
 import PanelShell from "@/components/panel/PanelShell";
 import { usePanelStore } from "@/store/panel";
 import AgentDRunningMark from "@/components/brand/AgentDRunningMark";
-import { PanelRight } from "lucide-react";
+import { showToast } from "@/components/ui/Toast";
+import { Check, Loader2, PanelRight, Pencil, X } from "lucide-react";
 
 function ChatPageInner() {
   const router = useRouter();
@@ -33,6 +34,7 @@ function ChatPageInner() {
     fetchSessions,
     selectSession,
     createAndSelectSession,
+    saveSessionTitle,
   } = useSessionStore();
 
   const {
@@ -57,6 +59,9 @@ function ChatPageInner() {
 
   const fetchTaskPlan = useTaskPlanStore((s) => s.fetchTaskPlan);
   const clearTaskPlan = useTaskPlanStore((s) => s.clearTaskPlan);
+  const [titleEditing, setTitleEditing] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [titleSaving, setTitleSaving] = useState(false);
 
   // SSE connection
   useSSE(currentSessionId);
@@ -206,6 +211,46 @@ function ChatPageInner() {
   };
 
   const currentSession = sessions.find((s) => s.id === currentSessionId);
+  const sessionTitle = stripThinkTags(currentSession?.title || "未命名会话");
+
+  useEffect(() => {
+    setTitleEditing(false);
+    setTitleDraft("");
+    setTitleSaving(false);
+  }, [currentSessionId]);
+
+  const beginTitleEdit = () => {
+    setTitleDraft(sessionTitle === "未命名会话" ? "" : sessionTitle);
+    setTitleEditing(true);
+  };
+
+  const cancelTitleEdit = () => {
+    setTitleEditing(false);
+    setTitleDraft("");
+  };
+
+  const submitTitleEdit = async () => {
+    if (!currentSessionId || titleSaving) return;
+    const cleaned = stripThinkTags(titleDraft).replace(/\s+/g, " ").trim();
+    if (!cleaned) {
+      showToast("error", "标题不能为空");
+      return;
+    }
+    if (cleaned === sessionTitle) {
+      cancelTitleEdit();
+      return;
+    }
+    setTitleSaving(true);
+    try {
+      await saveSessionTitle(currentSessionId, cleaned);
+      setTitleEditing(false);
+      setTitleDraft("");
+    } catch (err) {
+      showToast("error", err instanceof Error ? err.message : "会话标题保存失败");
+    } finally {
+      setTitleSaving(false);
+    }
+  };
 
   // Only show spinner before we have a session. Once currentSessionId is set,
   // background session-list refreshes must NOT unmount the chat area.
@@ -227,8 +272,6 @@ function ChatPageInner() {
     );
   }
 
-  const sessionTitle = stripThinkTags(currentSession?.title || "未命名会话");
-
   return (
     <div className="flex h-full min-w-0 flex-1 overflow-hidden bg-transparent">
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden px-4 py-3 md:px-6 md:py-4">
@@ -236,9 +279,64 @@ function ChatPageInner() {
           <div className="flex flex-wrap items-center justify-between gap-3 px-2 py-2 md:px-4 md:py-2.5">
             <div className="min-w-0">
               <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <h2 className="truncate text-[16px] font-medium tracking-[-0.02em] text-text-primary">
-                  {sessionTitle}
-                </h2>
+                {titleEditing ? (
+                  <form
+                    className="flex min-w-[220px] max-w-[520px] flex-1 items-center gap-1"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      submitTitleEdit();
+                    }}
+                  >
+                    <input
+                      autoFocus
+                      className="h-8 min-w-0 flex-1 rounded-md border border-border bg-bg-primary px-2 text-[15px] font-medium tracking-normal text-text-primary outline-none transition focus:border-accent"
+                      maxLength={80}
+                      value={titleDraft}
+                      onBlur={submitTitleEdit}
+                      onChange={(event) => setTitleDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          event.preventDefault();
+                          cancelTitleEdit();
+                        }
+                      }}
+                    />
+                    <button
+                      type="submit"
+                      disabled={titleSaving}
+                      onMouseDown={(event) => event.preventDefault()}
+                      className="inline-flex h-8 w-8 items-center justify-center rounded-md text-text-secondary transition hover:bg-bg-primary hover:text-text-primary disabled:opacity-50"
+                      title="保存标题"
+                    >
+                      {titleSaving ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={titleSaving}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={cancelTitleEdit}
+                      className="inline-flex h-8 w-8 items-center justify-center rounded-md text-text-secondary transition hover:bg-bg-primary hover:text-text-primary disabled:opacity-50"
+                      title="取消"
+                    >
+                      <X size={14} />
+                    </button>
+                  </form>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={beginTitleEdit}
+                    className="group/title flex min-w-0 max-w-[520px] items-center gap-1.5 rounded-md px-1 py-0.5 text-left transition hover:bg-bg-primary"
+                    title="编辑会话标题"
+                  >
+                    <h2 className="truncate text-[16px] font-medium tracking-normal text-text-primary">
+                      {sessionTitle}
+                    </h2>
+                    <Pencil
+                      size={13}
+                      className="shrink-0 text-text-secondary opacity-0 transition group-hover/title:opacity-100"
+                    />
+                  </button>
+                )}
                 <span
                   className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${statusColor[chatStatus] || statusColor.idle}`}
                 >

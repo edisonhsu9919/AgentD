@@ -98,7 +98,29 @@ def test_db_tail_detects_partial_mixed_tool_group():
     assert tail.reason == "partial_tool_group_closed"
 
 
-def test_terminal_gate_rejects_silent_completed_open_tool_call():
+def test_terminal_gate_finalizes_idle_when_db_tail_open_but_checkpoint_absent():
+    """v0.4.9 Phase A: DB tail open tool_call alone no longer kills the session.
+
+    Without a checkpoint, the gate falls through to FINALIZE_IDLE; DB tail
+    diagnostics are still attached to the decision for visibility.
+    """
+    decision = RuntimeIntegrityGate.decide_terminal(_payload(
+        None,
+        [_db_message(60, "assistant", [_tool_call_part("call_edit", "file_edit")])],
+    ))
+
+    assert decision.action == RuntimeGateAction.FINALIZE_IDLE
+    assert decision.can_accept_user_prompt is True
+    # Diagnostics still surface the open tool_call for doctor / observability.
+    assert decision.open_tool_call_ids == ["call_edit"]
+    assert decision.db_tail_seq == 60
+
+
+def test_terminal_gate_legacy_db_tail_failure_under_flag(monkeypatch):
+    """Legacy v0.4.4 behavior remains available behind the rollback flag."""
+    from core.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "runtime_integrity_gate_db_tail_enabled", True)
     decision = RuntimeIntegrityGate.decide_terminal(_payload(
         None,
         [_db_message(60, "assistant", [_tool_call_part("call_edit", "file_edit")])],
@@ -216,7 +238,13 @@ def test_mixed_parallel_hitl_partial_group_with_unmatched_permission_fails():
     ))
 
     assert decision.action == RuntimeGateAction.FAIL_INTEGRITY_ERROR
-    assert decision.reason == "hitl_open_tool_call_missing_pending_permission"
+    # v0.4.9 Phase A: same scenario, but the failure now comes from the
+    # pending-permission branch instead of the DB-tail open-tool-call branch
+    # (DB tail is diagnostics-only). Both reasons describe HITL/permission mismatch.
+    assert decision.reason in {
+        "hitl_open_tool_call_missing_pending_permission",
+        "pending_permission_without_matching_open_hitl_checkpoint",
+    }
 
 
 def test_invalid_orphan_partial_group_with_matching_permission_enters_waiting():
@@ -309,10 +337,26 @@ def test_provider_ready_with_model_next_and_clean_db_tail_can_finalize_idle():
 
     assert checkpoint.state_kind.value == "provider_ready"
     assert decision.action == RuntimeGateAction.FINALIZE_IDLE
-    assert decision.reason == "checkpoint_and_db_tail_clean"
+    # v0.4.9: reason renamed; clean DB tail now produces "checkpoint_clean".
+    assert decision.reason == "checkpoint_clean"
 
 
-def test_prompt_ingress_rejects_open_runtime_state():
+def test_prompt_ingress_accepts_when_db_tail_dirty_and_checkpoint_absent():
+    """v0.4.9 Phase A: dirty DB tail without checkpoint no longer blocks ingress."""
+    decision = RuntimeIntegrityGate.decide_prompt_ingress(_payload(
+        None,
+        [_db_message(60, "assistant", [_tool_call_part("call_edit", "file_edit")])],
+    ))
+
+    assert decision.action == RuntimeGateAction.FINALIZE_IDLE
+    assert decision.can_accept_user_prompt is True
+
+
+def test_prompt_ingress_legacy_rejects_open_runtime_state_under_flag(monkeypatch):
+    """Legacy v0.4.4 behavior remains available behind the rollback flag."""
+    from core.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "runtime_integrity_gate_db_tail_enabled", True)
     decision = RuntimeIntegrityGate.decide_prompt_ingress(_payload(
         None,
         [_db_message(60, "assistant", [_tool_call_part("call_edit", "file_edit")])],

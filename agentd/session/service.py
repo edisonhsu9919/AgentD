@@ -114,6 +114,25 @@ async def get_session(
     return result.scalar_one_or_none()
 
 
+async def update_session_title(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    title: str,
+) -> Optional[Session]:
+    from agent.session_title import sanitize_session_title
+
+    normalized = sanitize_session_title(title, max_chars=80)
+    if not normalized:
+        return None
+    await db.execute(
+        update(Session)
+        .where(Session.id == session_id)
+        .values(title=normalized, updated_at=datetime.now(timezone.utc))
+    )
+    await db.flush()
+    return await get_session(db, session_id)
+
+
 async def delete_session(db: AsyncSession, session_id: uuid.UUID) -> bool:
     """Delete one session row.
 

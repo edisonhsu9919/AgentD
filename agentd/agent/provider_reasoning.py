@@ -44,6 +44,28 @@ _PROVIDER_CONTINUATION_KEYS = {
     "glm": ("reasoning_content",),
     "minimax": ("reasoning_content", "reasoning_details"),
 }
+_PROVIDER_EXTRA_BODY_KEYS = {
+    "top_k",
+    "min_p",
+    "typical_p",
+    "repeat_penalty",
+    "repetition_penalty",
+    "mirostat",
+    "mirostat_tau",
+    "mirostat_eta",
+    "chat_template_kwargs",
+    "enable_thinking",
+    "preserve_thinking",
+    "thinking",
+    "thinking_budget",
+}
+_CHATOPENAI_DIRECT_KEYS = {
+    "temperature",
+    "max_tokens",
+    "top_p",
+    "presence_penalty",
+    "frequency_penalty",
+}
 
 
 # Backward-compatible import name for v0.4.3 call sites. New provider request
@@ -73,14 +95,24 @@ def build_chatopenai_reasoning_kwargs(resolved_model_config) -> dict[str, Any]:
     model_kwargs = dict(extra_params.pop("model_kwargs", {}) or {})
     extra_body = dict(extra_params.pop("extra_body", {}) or {})
 
-    # Any remaining top-level provider params flow through model_kwargs.
+    # Provider-specific request body extensions must go through ``extra_body``.
+    # LangChain flattens ``model_kwargs`` into OpenAI SDK keyword arguments;
+    # local OpenAI-compatible servers such as llama.cpp accept fields like
+    # ``min_p`` in the JSON body, but the SDK rejects them as Python kwargs.
+    direct_kwargs: dict[str, Any] = {}
     for key, value in extra_params.items():
-        model_kwargs[key] = value
+        if key in _CHATOPENAI_DIRECT_KEYS:
+            direct_kwargs[key] = value
+        elif key in _PROVIDER_EXTRA_BODY_KEYS:
+            extra_body[key] = value
+        else:
+            model_kwargs[key] = value
 
     kwargs: dict[str, Any] = {}
     timeout_seconds = getattr(resolved_model_config, "timeout_seconds", None)
     if timeout_seconds:
         kwargs["timeout"] = timeout_seconds
+    kwargs.update(direct_kwargs)
     if model_kwargs:
         kwargs["model_kwargs"] = model_kwargs
     if extra_body:
@@ -400,7 +432,7 @@ def _normalize_reasoning_request_params(
         thinking = normalized.pop("thinking", None)
         if "enable_thinking" not in extra_body:
             maybe_enable = _coerce_enable_thinking(
-                normalized.get("enable_thinking", None) if "enable_thinking" in normalized else thinking,
+                normalized.pop("enable_thinking", None) if "enable_thinking" in normalized else thinking,
             )
             if maybe_enable is not None:
                 extra_body["enable_thinking"] = maybe_enable

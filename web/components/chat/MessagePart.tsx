@@ -5,7 +5,7 @@ import type { Part, SubtaskResultPart } from "@/lib/types";
 import ToolCallBlock from "./ToolCallBlock";
 import KnowledgeSourceList from "./KnowledgeSourceList";
 import MessageMarkdown from "./MessageMarkdown";
-import { ChevronRight, GitBranch, ExternalLink } from "lucide-react";
+import { ChevronRight, GitBranch, ExternalLink, Terminal } from "lucide-react";
 
 /**
  * Strip <think>...</think> blocks from LLM output.
@@ -39,6 +39,25 @@ export default function MessagePart({ part, role = "assistant", toolNameMap, too
       return (
         <div className="chat-prose">
           <MessageMarkdown>{cleaned}</MessageMarkdown>
+        </div>
+      );
+    }
+
+    case "command":
+      return (
+        <div className="mb-2 inline-flex items-center gap-2 rounded-[8px] bg-bg-tertiary/70 px-2.5 py-1.5 font-mono text-[12px] text-text-secondary">
+          <Terminal size={12} />
+          <span>{part.command}</span>
+        </div>
+      );
+
+    case "command_result": {
+      const isError = part.status === "error";
+      return (
+        <div className={`chat-prose rounded-[8px] px-3 py-2 ${
+          isError ? "bg-danger/10 text-danger" : "bg-accent/10 text-text-primary"
+        }`}>
+          <MessageMarkdown>{part.text}</MessageMarkdown>
         </div>
       );
     }
